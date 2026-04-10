@@ -88,6 +88,40 @@ fi
 
 ok "cc installed"
 
+# ---- Scrub conflicting cc aliases --------------------------------------------
+#
+# Shell aliases take precedence over PATH, so a stray `alias cc='claude'` in
+# any rc file will shadow $BIN_DIR/cc and turn `cc kill` into `claude kill`
+# (launching Claude Code with "kill" as the initial prompt — not what you
+# want). Old versions of the OpenClaw bridge installed exactly that alias,
+# so we scrub it here wherever we can find it. We only touch `alias cc=`
+# lines, never `cc-teams` or anything else.
+
+step "scrubbing conflicting 'cc' aliases"
+
+scrub_cc_alias() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    # Match: optional whitespace, optional `alias `, then `cc=` (word-boundary
+    # prevents matching cc-teams / cctk / etc).
+    if grep -qE "^\s*(alias\s+)?cc=" "$file"; then
+        cp "$file" "$file.bak.$BACKUP_SUFFIX"
+        # Comment out rather than delete, so users can see what happened.
+        sed -i -E "s|^(\s*)((alias\s+)?cc=.*)$|\1# \2  # disabled by openclaw-claude-bridge installer|" "$file"
+        info "scrubbed cc alias in $file (backup: $(basename "$file.bak.$BACKUP_SUFFIX"))"
+    fi
+}
+
+# Legacy bridge aliases file — most common source of the conflict.
+scrub_cc_alias "$HOME/.openclaw/bridge/aliases.sh"
+
+# Also check the usual rc files in case it was dropped there directly.
+for rc in "$HOME/.bashrc" "$HOME/.bash_aliases" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile"; do
+    scrub_cc_alias "$rc"
+done
+
+ok "alias scrub complete"
+
 # ---- Write ~/.claude/settings.json -------------------------------------------
 
 step "configuring Claude Code settings"
