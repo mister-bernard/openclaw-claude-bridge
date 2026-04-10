@@ -6,8 +6,10 @@ daily-driver command — `cc` — for running Claude Code with:
 
 - A unified `CLAUDE.md` auto-generated from your OpenClaw workspace
 - Claude Code's experimental **Agent Teams** mode turned on
-- A dedicated, Mosh-friendly tmux session with 100k scrollback and
+- Dedicated, Mosh-friendly tmux sessions with 100k scrollback and
   working mouse wheel
+- Support for multiple parallel sessions (`cc new`) so you can run
+  independent workflows side-by-side in different terminals
 - Role presets for spawning research / full-stack / debug teams in one
   paste
 - Cockpit-style status bar and layout shortcuts
@@ -68,14 +70,45 @@ non-TTY stdin is `bernard`.
 ## Daily use
 
 ```bash
-cc                      # start or attach the team session
+cc                      # start or attach the default 'main' session
+cc new                  # start another parallel session (auto-named main-2, …)
+cc new deploy           # …or with an explicit name
+cc ls                   # list all cc sessions
+cc attach main-2        # attach to a specific session
 cc sync                 # regenerate ~/CLAUDE.md from the workspace
-cc status               # show session and workspace state
+cc status               # show session and workspace state (all sessions)
 cc roles                # list available role presets
 cc preset full-stack    # print the full-stack preset prompt (paste into lead)
-cc kill                 # kill the team session (with confirmation)
+cc kill                 # kill the default session (with confirmation)
+cc kill main-2          # …or kill a specific session
 cc help                 # full usage
 ```
+
+### Parallel sessions
+
+`cc new` lets you run independent workflows side-by-side without them
+stepping on each other. Open a second terminal tab, run `cc new`, and
+you get a fresh lead in its own tmux session — one for the thing you're
+hacking on, another for a long-running research pass, another for ops.
+Each session is independent: own context, own pane layout, own team
+roster.
+
+```bash
+# tab 1
+cc                      # main: working on the feature branch
+
+# tab 2
+cc new docs             # docs: long-running docs rewrite
+cc new                  # or auto-named main-2 if you don't care
+
+# any tab
+cc ls                   # see what's running, which is attached
+cc attach main          # jump back to main from anywhere
+```
+
+All parallel sessions share the isolated `cc` tmux socket, so they stay
+out of your personal tmux sessions. `cc ls` and `cc status` show the
+full roster; `cc kill <name>` takes them down one at a time.
 
 Inside the session (prefix = `Ctrl-b`):
 

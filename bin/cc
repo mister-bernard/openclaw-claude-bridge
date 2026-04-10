@@ -12,10 +12,15 @@ set -euo pipefail
 # run `tmux -L cc ls` to see cc's sessions.
 #
 # Commands:
-#   cc                    Start or attach the team session
+#   cc                    Start or attach the default 'main' session
+#   cc new [name]         Create another parallel session. No name → auto-pick
+#                         the next free main-2, main-3, … so you can run more
+#                         than one workflow side-by-side in different terminals.
+#   cc ls                 List all cc sessions
+#   cc attach <name>      Attach to a specific cc session
 #   cc sync               Regenerate ~/CLAUDE.md from the OpenClaw workspace
-#   cc kill               Kill the team session (with confirmation)
-#   cc status             Show session / workspace status
+#   cc kill [name]        Kill a session (default: main, with confirmation)
+#   cc status [name]      Show session / workspace status (all sessions if no name)
 #   cc roles              List available role presets
 #   cc preset <name>      Print a preset prompt (copy-paste into the lead)
 #   cc help               Show this help
@@ -25,7 +30,7 @@ BRIDGE_DIR="${HOME}/.openclaw/bridge"
 BRIDGE_TMUX_CONF="${BRIDGE_DIR}/tmux.conf"
 BRIDGE_LIB="${BRIDGE_DIR}/lib/bridge.sh"
 PRESETS_DIR="${BRIDGE_DIR}/presets"
-SESSION="main"
+DEFAULT_SESSION="main"
 SOCKET="cc"
 CLAUDE_MD="${HOME}/CLAUDE.md"
 WORKDIR="${CC_WORKDIR:-${HOME}}"
@@ -66,7 +71,31 @@ sanity_check() {
 tmux_cc() { tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" "$@"; }
 
 session_exists() {
-    tmux_cc has-session -t "$SESSION" 2>/dev/null
+    local name="${1:-$DEFAULT_SESSION}"
+    tmux_cc has-session -t "$name" 2>/dev/null
+}
+
+# Pick the next free auto-numbered session name: main-2, main-3, ...
+# We always skip $DEFAULT_SESSION so `cc new` never silently squats 'main'.
+next_session_name() {
+    local i=2
+    while session_exists "${DEFAULT_SESSION}-${i}"; do
+        i=$((i + 1))
+    done
+    printf "%s-%d" "$DEFAULT_SESSION" "$i"
+}
+
+# Create a new detached cc session with the given name and launch claude
+# in the first pane. Caller is responsible for attaching.
+create_session() {
+    local name="$1"
+    info "starting new cc session '$name' on socket '$SOCKET'"
+    tmux_cc new-session -d -s "$name" -c "$WORKDIR" \
+        -x "$(tput cols 2>/dev/null || echo 200)" \
+        -y "$(tput lines 2>/dev/null || echo 50)"
+    # Name the first pane "lead" so the status bar shows who's who.
+    tmux_cc select-pane -t "${name}.1" -T "lead"
+    tmux_cc send-keys  -t "${name}.1" "claude" Enter
 }
 
 # ---- Commands ---------------------------------------------------------------
@@ -79,17 +108,12 @@ cmd_start() {
         ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
     fi
 
-    if session_exists; then
-        info "attaching to existing cc session"
-        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$SESSION"
+    if session_exists "$DEFAULT_SESSION"; then
+        info "attaching to existing cc session '$DEFAULT_SESSION'"
+        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
     fi
 
-    info "starting new cc session on socket '$SOCKET'"
-    tmux_cc new-session -d -s "$SESSION" -c "$WORKDIR" -x "$(tput cols 2>/dev/null || echo 200)" -y "$(tput lines 2>/dev/null || echo 50)"
-
-    # Name the first pane "lead" so the status bar shows who's who.
-    tmux_cc select-pane -t "${SESSION}.1" -T "lead"
-    tmux_cc send-keys  -t "${SESSION}.1" "claude" Enter
+    create_session "$DEFAULT_SESSION"
 
     ok "session ready — attaching"
     echo
@@ -97,9 +121,76 @@ cmd_start() {
     dim "  prefix + B = horizontal bars layout"
     dim "  prefix + T = tiled layout"
     dim "  ask the lead: 'create a team with N teammates...' (try: cc roles)"
+    dim "  run 'cc new' in another terminal for a parallel session"
     echo
     sleep 0.3
-    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$SESSION"
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
+}
+
+cmd_new() {
+    sanity_check || exit 1
+
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        name="$(next_session_name)"
+    elif session_exists "$name"; then
+        warn "session '$name' already exists — use 'cc attach $name' to attach"
+        exit 1
+    fi
+
+    if [[ -x "$BRIDGE_LIB" ]]; then
+        ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
+    fi
+
+    create_session "$name"
+
+    ok "session '$name' ready — attaching"
+    echo
+    dim "  prefix + d    detach (session keeps running — reattach with 'cc attach $name')"
+    dim "  cc ls         see all running sessions"
+    echo
+    sleep 0.3
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$name"
+}
+
+cmd_attach() {
+    sanity_check || exit 1
+
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        warn "usage: cc attach <name>"
+        echo
+        cmd_ls
+        exit 1
+    fi
+    if ! session_exists "$name"; then
+        warn "no cc session named '$name'"
+        echo
+        cmd_ls
+        exit 1
+    fi
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$name"
+}
+
+cmd_ls() {
+    if ! tmux_cc list-sessions >/dev/null 2>&1; then
+        info "no cc sessions running"
+        dim "  cc           start the default 'main' session"
+        dim "  cc new       start a fresh parallel session"
+        return 0
+    fi
+    printf "%scc sessions%s\n" "$C_BOLD" "$C_RESET"
+    local sname attached panes tag
+    while IFS=$'\t' read -r sname attached; do
+        panes=$(tmux_cc list-panes -s -t "$sname" 2>/dev/null | wc -l)
+        tag=""
+        [[ "$attached" == "1" ]] && tag=" ${C_GREEN}(attached)${C_RESET}"
+        printf "  %-20s %s pane(s)%b\n" "$sname" "$panes" "$tag"
+    done < <(tmux_cc list-sessions -F "#{session_name}	#{session_attached}" 2>/dev/null)
+    echo
+    dim "  cc attach <name>   attach to a session"
+    dim "  cc new [name]      create another parallel session"
+    dim "  cc kill <name>     kill a session"
 }
 
 cmd_sync() {
@@ -112,30 +203,46 @@ cmd_sync() {
 }
 
 cmd_kill() {
-    if ! session_exists; then
-        info "no cc session to kill"
+    local name="${1:-$DEFAULT_SESSION}"
+    if ! session_exists "$name"; then
+        info "no cc session named '$name' to kill"
         exit 0
     fi
-    printf "%s[cc]%s kill the running cc session? [y/N] " "$C_RED" "$C_RESET"
+    printf "%s[cc]%s kill cc session '%s'? [y/N] " "$C_RED" "$C_RESET" "$name"
     read -r ans
     if [[ "$ans" =~ ^[Yy]$ ]]; then
-        tmux_cc kill-session -t "$SESSION"
-        ok "killed"
+        tmux_cc kill-session -t "$name"
+        ok "killed '$name'"
     else
         info "cancelled"
     fi
 }
 
-cmd_status() {
-    printf "%sSession%s\n" "$C_BOLD" "$C_RESET"
-    if session_exists; then
+# Print one-line status for a single session (helper for cmd_status).
+print_session_status() {
+    local name="$1"
+    if session_exists "$name"; then
         local panes
-        panes=$(tmux_cc list-panes -t "$SESSION" -F "#{pane_index}:#{pane_title}" 2>/dev/null | paste -sd ' ' -)
-        printf "  status   : %srunning%s\n" "$C_GREEN" "$C_RESET"
-        printf "  socket   : %s\n" "$SOCKET"
-        printf "  panes    : %s\n" "${panes:-none}"
+        panes=$(tmux_cc list-panes -t "$name" -F "#{pane_index}:#{pane_title}" 2>/dev/null | paste -sd ' ' -)
+        printf "  %-14s %srunning%s  panes: %s\n" "$name" "$C_GREEN" "$C_RESET" "${panes:-none}"
     else
-        printf "  status   : %sstopped%s\n" "$C_DIM" "$C_RESET"
+        printf "  %-14s %sstopped%s\n" "$name" "$C_DIM" "$C_RESET"
+    fi
+}
+
+cmd_status() {
+    local name="${1:-}"
+
+    printf "%sSessions%s  (socket: %s)\n" "$C_BOLD" "$C_RESET" "$SOCKET"
+    if [[ -n "$name" ]]; then
+        print_session_status "$name"
+    elif tmux_cc list-sessions >/dev/null 2>&1; then
+        local sname
+        while IFS= read -r sname; do
+            print_session_status "$sname"
+        done < <(tmux_cc list-sessions -F "#{session_name}" 2>/dev/null)
+    else
+        printf "  %sno cc sessions running%s\n" "$C_DIM" "$C_RESET"
     fi
 
     echo
@@ -207,10 +314,15 @@ cmd_help() {
 ${C_BOLD}cc${C_RESET} — OpenClaw + Claude Code daily-driver wrapper
 
 ${C_BOLD}USAGE${C_RESET}
-  cc                    Start or attach the team session
+  cc                    Start or attach the default 'main' session
+  cc new [name]         Create another parallel session (auto-named main-2,
+                        main-3, … if no name given). Use this in a second
+                        terminal tab to run two workflows side-by-side.
+  cc ls                 List all cc sessions
+  cc attach <name>      Attach to a specific session
   cc sync               Regenerate ~/CLAUDE.md from the OpenClaw workspace
-  cc kill               Kill the team session (with confirmation)
-  cc status             Show session / workspace status
+  cc kill [name]        Kill a session (default: main, with confirmation)
+  cc status [name]      Show session / workspace status
   cc roles              List available role presets
   cc preset <name>      Print a preset prompt (copy-paste into the lead)
   cc help               This message
@@ -237,9 +349,12 @@ EOF
 
 case "${1:-start}" in
     ""|start)   cmd_start ;;
+    new)        shift; cmd_new "$@" ;;
+    ls|list)    cmd_ls ;;
+    attach)     shift; cmd_attach "$@" ;;
     sync)       cmd_sync ;;
-    kill)       cmd_kill ;;
-    status)     cmd_status ;;
+    kill)       shift; cmd_kill "$@" ;;
+    status)     shift; cmd_status "$@" ;;
     roles)      cmd_roles ;;
     preset)     shift; cmd_preset "$@" ;;
     help|-h|--help) cmd_help ;;
