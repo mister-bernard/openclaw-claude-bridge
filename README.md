@@ -207,6 +207,15 @@ crontab -l | grep -v "/.openclaw/bridge/lib/bridge.sh" | crontab -
 ls ~/.claude/settings.json.bak.*   # pick one and mv it back
 ```
 
+## Best practices
+
+Once you're past install, read [`docs/best-practices.md`](docs/best-practices.md)
+for a field guide to getting the most out of the `cc` + Claude Code +
+Agent Teams setup: what belongs in `CLAUDE.md` (and what doesn't),
+permission tuning, genuinely useful hook patterns, when Agent Teams
+pays off and when it doesn't, tmux/mosh ergonomics, and context/cost
+discipline.
+
 ## License
 
 MIT — see `LICENSE`.
