@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================================================
+# cc — OpenClaw + Claude Code daily-driver wrapper
+#
+# A single entry point for starting/attaching a Claude Code session with
+# Agent Teams enabled, Mosh-friendly tmux config, and preset team roles.
+#
+# Uses a DEDICATED tmux socket (`-L cc`) so it never collides with your
+# personal tmux sessions. You can run `tmux ls` and see nothing from cc;
+# run `tmux -L cc ls` to see cc's sessions.
+#
+# Commands:
+#   cc                    Start or attach the team session
+#   cc sync               Regenerate ~/CLAUDE.md from the OpenClaw workspace
+#   cc kill               Kill the team session (with confirmation)
+#   cc status             Show session / workspace status
+#   cc roles              List available role presets
+#   cc preset <name>      Print a preset prompt (copy-paste into the lead)
+#   cc help               Show this help
+# ============================================================================
+
+BRIDGE_DIR="${HOME}/.openclaw/bridge"
+BRIDGE_TMUX_CONF="${BRIDGE_DIR}/tmux.conf"
+BRIDGE_LIB="${BRIDGE_DIR}/lib/bridge.sh"
+PRESETS_DIR="${BRIDGE_DIR}/presets"
+SESSION="main"
+SOCKET="cc"
+CLAUDE_MD="${HOME}/CLAUDE.md"
+WORKDIR="${CC_WORKDIR:-${HOME}}"
+
+# ---- Colors for output ------------------------------------------------------
+if [[ -t 1 ]]; then
+    C_BLUE=$'\033[38;5;38m'
+    C_DIM=$'\033[38;5;244m'
+    C_BOLD=$'\033[1m'
+    C_RED=$'\033[38;5;203m'
+    C_GREEN=$'\033[38;5;114m'
+    C_RESET=$'\033[0m'
+else
+    C_BLUE="" C_DIM="" C_BOLD="" C_RED="" C_GREEN="" C_RESET=""
+fi
+
+info()  { printf "%s[cc]%s %s\n" "$C_BLUE" "$C_RESET" "$*"; }
+warn()  { printf "%s[cc]%s %s\n" "$C_RED"  "$C_RESET" "$*" >&2; }
+ok()    { printf "%s[cc]%s %s\n" "$C_GREEN" "$C_RESET" "$*"; }
+dim()   { printf "%s%s%s\n" "$C_DIM" "$*" "$C_RESET"; }
+
+# ---- Prereq checks ----------------------------------------------------------
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        warn "missing dependency: $1"
+        return 1
+    }
+}
+
+sanity_check() {
+    local missing=0
+    need_cmd tmux || missing=1
+    need_cmd claude || { warn "'claude' CLI not on PATH — install Claude Code first"; missing=1; }
+    [[ -f "$BRIDGE_TMUX_CONF" ]] || { warn "missing $BRIDGE_TMUX_CONF — re-run install.sh"; missing=1; }
+    (( missing == 0 ))
+}
+
+tmux_cc() { tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" "$@"; }
+
+session_exists() {
+    tmux_cc has-session -t "$SESSION" 2>/dev/null
+}
+
+# ---- Commands ---------------------------------------------------------------
+
+cmd_start() {
+    sanity_check || exit 1
+
+    # Sync CLAUDE.md in the background so we don't delay session start.
+    if [[ -x "$BRIDGE_LIB" ]]; then
+        ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
+    fi
+
+    if session_exists; then
+        info "attaching to existing cc session"
+        exec tmux_cc attach -t "$SESSION"
+    fi
+
+    info "starting new cc session on socket '$SOCKET'"
+    tmux_cc new-session -d -s "$SESSION" -c "$WORKDIR" -x "$(tput cols 2>/dev/null || echo 200)" -y "$(tput lines 2>/dev/null || echo 50)"
+
+    # Name the first pane "lead" so the status bar shows who's who.
+    tmux_cc select-pane -t "${SESSION}.1" -T "lead"
+    tmux_cc send-keys  -t "${SESSION}.1" "claude" Enter
+
+    ok "session ready — attaching"
+    echo
+    dim "  prefix = Ctrl-b  |  scroll = mouse wheel or Shift+PgUp"
+    dim "  prefix + B = horizontal bars layout"
+    dim "  prefix + T = tiled layout"
+    dim "  ask the lead: 'create a team with N teammates...' (try: cc roles)"
+    echo
+    sleep 0.3
+    exec tmux_cc attach -t "$SESSION"
+}
+
+cmd_sync() {
+    if [[ ! -x "$BRIDGE_LIB" ]]; then
+        warn "$BRIDGE_LIB not found — re-run install.sh"
+        exit 1
+    fi
+    bash "$BRIDGE_LIB" sync
+    ok "synced: $CLAUDE_MD"
+}
+
+cmd_kill() {
+    if ! session_exists; then
+        info "no cc session to kill"
+        exit 0
+    fi
+    printf "%s[cc]%s kill the running cc session? [y/N] " "$C_RED" "$C_RESET"
+    read -r ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        tmux_cc kill-session -t "$SESSION"
+        ok "killed"
+    else
+        info "cancelled"
+    fi
+}
+
+cmd_status() {
+    printf "%sSession%s\n" "$C_BOLD" "$C_RESET"
+    if session_exists; then
+        local panes
+        panes=$(tmux_cc list-panes -t "$SESSION" -F "#{pane_index}:#{pane_title}" 2>/dev/null | paste -sd ' ' -)
+        printf "  status   : %srunning%s\n" "$C_GREEN" "$C_RESET"
+        printf "  socket   : %s\n" "$SOCKET"
+        printf "  panes    : %s\n" "${panes:-none}"
+    else
+        printf "  status   : %sstopped%s\n" "$C_DIM" "$C_RESET"
+    fi
+
+    echo
+    printf "%sWorkspace%s\n" "$C_BOLD" "$C_RESET"
+    if [[ -f "$CLAUDE_MD" ]]; then
+        local lines size mtime
+        lines=$(wc -l < "$CLAUDE_MD")
+        size=$(wc -c < "$CLAUDE_MD")
+        mtime=$(date -r "$CLAUDE_MD" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || stat -c %y "$CLAUDE_MD" 2>/dev/null | cut -d. -f1)
+        printf "  CLAUDE.md: %d lines, %d bytes (last sync: %s)\n" "$lines" "$size" "$mtime"
+    else
+        printf "  CLAUDE.md: %smissing%s — run 'cc sync'\n" "$C_RED" "$C_RESET"
+    fi
+
+    echo
+    printf "%sPresets%s\n" "$C_BOLD" "$C_RESET"
+    if [[ -d "$PRESETS_DIR" ]]; then
+        for f in "$PRESETS_DIR"/*.md; do
+            [[ -f "$f" ]] || continue
+            local name desc
+            name=$(basename "$f" .md)
+            desc=$(grep -m1 '^#' "$f" | sed 's/^#* *//')
+            printf "  %-14s %s\n" "$name" "${desc:-(no description)}"
+        done
+    else
+        printf "  %sno presets installed%s\n" "$C_DIM" "$C_RESET"
+    fi
+}
+
+cmd_roles() {
+    if [[ ! -d "$PRESETS_DIR" ]]; then
+        warn "no presets directory at $PRESETS_DIR"
+        exit 1
+    fi
+    printf "%sAvailable role presets%s\n\n" "$C_BOLD" "$C_RESET"
+    for f in "$PRESETS_DIR"/*.md; do
+        [[ -f "$f" ]] || continue
+        local name desc
+        name=$(basename "$f" .md)
+        desc=$(grep -m1 '^#' "$f" | sed 's/^#* *//')
+        printf "  %s%-14s%s %s\n" "$C_BLUE" "$name" "$C_RESET" "${desc:-}"
+    done
+    echo
+    dim "  cc preset <name>    print the spawn prompt"
+    dim "  then copy-paste it into the lead's input"
+}
+
+cmd_preset() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        warn "usage: cc preset <name>"
+        echo
+        cmd_roles
+        exit 1
+    fi
+    local file="$PRESETS_DIR/$name.md"
+    if [[ ! -f "$file" ]]; then
+        warn "preset not found: $name"
+        echo
+        cmd_roles
+        exit 1
+    fi
+    # Strip the H1 title and output the body — that's the prompt.
+    awk 'BEGIN{skip=1} /^#/ && skip {skip=0; next} {print}' "$file" | sed '1{/^$/d}'
+}
+
+cmd_help() {
+    cat <<EOF
+${C_BOLD}cc${C_RESET} — OpenClaw + Claude Code daily-driver wrapper
+
+${C_BOLD}USAGE${C_RESET}
+  cc                    Start or attach the team session
+  cc sync               Regenerate ~/CLAUDE.md from the OpenClaw workspace
+  cc kill               Kill the team session (with confirmation)
+  cc status             Show session / workspace status
+  cc roles              List available role presets
+  cc preset <name>      Print a preset prompt (copy-paste into the lead)
+  cc help               This message
+
+${C_BOLD}INSIDE THE SESSION${C_RESET}
+  Ctrl-b + B            Horizontal bars layout (stacked top-to-bottom)
+  Ctrl-b + H            Vertical columns layout (side-by-side)
+  Ctrl-b + T            Tiled layout
+  Mouse wheel           Scroll back (100k lines of history)
+  Shift+PageUp/Down     Keyboard scrollback
+  Alt+Arrow             Jump between panes
+  Ctrl-b + d            Detach (session keeps running — reattach with 'cc')
+
+${C_BOLD}SPAWNING A TEAM${C_RESET}
+  Just ask the lead in plain English:
+    "create a team with 4 teammates in split-pane tmux mode"
+  Or use a preset:
+    cc preset full-stack
+  and paste the output into the lead.
+EOF
+}
+
+# ---- Dispatch ---------------------------------------------------------------
+
+case "${1:-start}" in
+    ""|start)   cmd_start ;;
+    sync)       cmd_sync ;;
+    kill)       cmd_kill ;;
+    status)     cmd_status ;;
+    roles)      cmd_roles ;;
+    preset)     shift; cmd_preset "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)          warn "unknown command: $1"; echo; cmd_help; exit 1 ;;
+esac
