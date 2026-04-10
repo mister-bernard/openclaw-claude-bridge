@@ -29,6 +29,14 @@ BIN_DIR="${HOME}/.local/bin"
 BACKUP_SUFFIX="$(date +%Y%m%d-%H%M%S)"
 
 OC_WORKSPACE="${OC_WORKSPACE:-${HOME}/.openclaw/workspace}"
+BERNARD_BOOTSTRAP_REPO="${BERNARD_BOOTSTRAP_REPO:-https://github.com/mister-bernard/bernard-bootstrap.git}"
+
+# Non-interactive override: OC_BOOTSTRAP=bernard|default|skip
+# - bernard: clone bernard-bootstrap and run its setup.sh
+# - default: install openclaw via npm and create stub workspace files
+# - skip: fail if workspace is missing (old behavior)
+# If unset, prompt interactively on a TTY; default to 'bernard' when piped.
+OC_BOOTSTRAP="${OC_BOOTSTRAP:-}"
 
 C_B=$'\033[1m'; C_BLUE=$'\033[38;5;38m'; C_DIM=$'\033[38;5;244m'
 C_RED=$'\033[38;5;203m'; C_GREEN=$'\033[38;5;114m'; C_R=$'\033[0m'
@@ -40,6 +48,147 @@ die()  { warn "$*"; exit 1; }
 
 step() { printf "\n%s==>%s %s%s%s\n" "$C_BLUE" "$C_R" "$C_B" "$*" "$C_R"; }
 
+# ---- Workspace bootstrap helpers --------------------------------------------
+
+REQUIRED_WORKSPACE_FILES=(IDENTITY.md USER.md SOUL.md AGENTS.md TOOLS.md)
+
+workspace_is_complete() {
+    [[ -d "$OC_WORKSPACE" ]] || return 1
+    local f
+    for f in "${REQUIRED_WORKSPACE_FILES[@]}"; do
+        [[ -f "$OC_WORKSPACE/$f" ]] || return 1
+    done
+    return 0
+}
+
+bootstrap_bernard() {
+    step "bootstrapping workspace via mister-bernard/bernard-bootstrap"
+
+    command -v git >/dev/null 2>&1 || die "git is required for Bernard Bootstrap (apt install git / brew install git)"
+
+    local tmpdir
+    tmpdir="$(mktemp -d -t bernard-bootstrap.XXXXXX)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmpdir'" RETURN
+
+    info "cloning $BERNARD_BOOTSTRAP_REPO"
+    git clone --depth 1 "$BERNARD_BOOTSTRAP_REPO" "$tmpdir/bernard-bootstrap" >/dev/null 2>&1 \
+        || die "failed to clone bernard-bootstrap (check network / repo URL)"
+
+    info "running bernard-bootstrap setup.sh"
+    if ! (cd "$tmpdir/bernard-bootstrap" && bash setup.sh); then
+        warn "bernard-bootstrap setup.sh exited non-zero"
+        warn "this is usually because 'openclaw' CLI is not installed yet"
+        warn "the workspace files may still have been created — continuing"
+    fi
+
+    if workspace_is_complete; then
+        ok "Bernard Bootstrap workspace ready at $OC_WORKSPACE"
+    else
+        die "Bernard Bootstrap finished but required files are still missing in $OC_WORKSPACE"
+    fi
+}
+
+bootstrap_default() {
+    step "bootstrapping workspace with default OpenClaw stubs"
+
+    if command -v openclaw >/dev/null 2>&1; then
+        info "openclaw already installed: $(command -v openclaw)"
+    elif command -v npm >/dev/null 2>&1; then
+        info "installing openclaw via npm (npm install -g openclaw)"
+        if ! npm install -g openclaw >/dev/null 2>&1; then
+            warn "npm install -g openclaw failed — continuing with stub workspace only"
+            warn "you can install OpenClaw manually later: https://openclaw.ai"
+        fi
+    else
+        warn "npm not found — skipping openclaw install"
+        warn "install openclaw manually later: https://openclaw.ai"
+    fi
+
+    info "creating stub workspace at $OC_WORKSPACE"
+    mkdir -p "$OC_WORKSPACE/memory" "$OC_WORKSPACE/config"
+
+    local f title
+    for f in "${REQUIRED_WORKSPACE_FILES[@]}"; do
+        if [[ -f "$OC_WORKSPACE/$f" ]]; then
+            info "$f already exists — skipping"
+            continue
+        fi
+        title="${f%.md}"
+        cat > "$OC_WORKSPACE/$f" <<STUB
+# $title
+
+TODO: customize this file. This is a placeholder written by
+openclaw-claude-bridge install.sh for the 'default' bootstrap path.
+
+For battle-tested templates covering IDENTITY, USER, SOUL, AGENTS, and
+TOOLS — plus an operational playbook — see:
+
+  https://github.com/mister-bernard/bernard-bootstrap
+
+Re-run install.sh with OC_BOOTSTRAP=bernard to pull those in instead.
+STUB
+        info "created $f"
+    done
+
+    ok "default workspace stubs ready at $OC_WORKSPACE"
+}
+
+prompt_bootstrap() {
+    # Resolve which bootstrap path to take, honoring OC_BOOTSTRAP override.
+    local choice="$OC_BOOTSTRAP"
+
+    if [[ -z "$choice" ]]; then
+        if [[ ! -t 0 ]]; then
+            info "non-interactive shell detected — defaulting to Bernard Bootstrap"
+            info "(set OC_BOOTSTRAP=default to force default stubs, or =skip to abort)"
+            choice="bernard"
+        else
+            printf '\n'
+            printf '%sNo OpenClaw workspace found at %s%s\n' "$C_B" "$OC_WORKSPACE" "$C_R"
+            printf '\n'
+            printf 'How would you like to set it up?\n'
+            printf '\n'
+            printf '  %s1)%s %sBernard Bootstrap%s (recommended)\n' "$C_BLUE" "$C_R" "$C_B" "$C_R"
+            printf '     Clones mister-bernard/bernard-bootstrap and runs its setup.\n'
+            printf '     Drops in battle-tested templates (IDENTITY, SOUL, AGENTS, ...),\n'
+            printf '     an operational playbook, and safety scripts. Customize from there.\n'
+            printf '\n'
+            printf '  %s2)%s %sDefault OpenClaw%s (minimal stubs)\n' "$C_BLUE" "$C_R" "$C_B" "$C_R"
+            printf "     Installs 'openclaw' from npm and writes blank placeholder files.\n"
+            printf '     Fastest path. You write everything from scratch.\n'
+            printf '\n'
+            printf '  %s3)%s %sAbort%s\n' "$C_BLUE" "$C_R" "$C_B" "$C_R"
+            printf "     Let me set up %s myself and re-run install.sh.\n" "$OC_WORKSPACE"
+            printf '\n'
+            printf 'Choice [1]: '
+            local reply
+            read -r reply || reply=""
+            case "${reply:-1}" in
+                1|bernard|B|b) choice="bernard" ;;
+                2|default|D|d) choice="default" ;;
+                3|abort|A|a|q|Q) choice="skip" ;;
+                *) warn "unrecognized choice '$reply' — defaulting to Bernard Bootstrap"; choice="bernard" ;;
+            esac
+        fi
+    fi
+
+    case "$choice" in
+        bernard)
+            bootstrap_bernard
+            ;;
+        default)
+            bootstrap_default
+            ;;
+        skip)
+            die "workspace setup skipped — populate $OC_WORKSPACE and re-run install.sh"
+            ;;
+        *)
+            die "invalid OC_BOOTSTRAP='$choice' (expected: bernard|default|skip)"
+            ;;
+    esac
+}
+
 # ---- Pre-flight checks -------------------------------------------------------
 
 step "pre-flight checks"
@@ -48,12 +197,14 @@ command -v tmux   >/dev/null 2>&1 || die "tmux is required (apt install tmux / b
 command -v claude >/dev/null 2>&1 || warn "'claude' not on PATH — install Claude Code before running 'cc'"
 command -v crontab >/dev/null 2>&1 || warn "crontab not found — auto-sync will be skipped"
 
-if [[ ! -d "$OC_WORKSPACE" ]]; then
-    die "OpenClaw workspace not found at $OC_WORKSPACE (set OC_WORKSPACE=... to override)"
+if ! workspace_is_complete; then
+    prompt_bootstrap
 fi
 
-for f in IDENTITY.md USER.md SOUL.md AGENTS.md TOOLS.md; do
-    [[ -f "$OC_WORKSPACE/$f" ]] || die "missing workspace file: $OC_WORKSPACE/$f"
+# Re-verify — if we still don't have all the files, the bootstrap failed
+# silently and there's no point continuing.
+for f in "${REQUIRED_WORKSPACE_FILES[@]}"; do
+    [[ -f "$OC_WORKSPACE/$f" ]] || die "missing workspace file after bootstrap: $OC_WORKSPACE/$f"
 done
 
 [[ -d "$CLAUDE_DIR" ]] || mkdir -p "$CLAUDE_DIR"

@@ -48,6 +48,23 @@ isn't.
   `IDENTITY.md`, `USER.md`, `SOUL.md`, `AGENTS.md`, `TOOLS.md`
   (override with `OC_WORKSPACE=...`)
 
+**Don't have a workspace yet?** The installer will notice and offer to set
+one up for you:
+
+1. **Bernard Bootstrap** (recommended) — clones
+   [`mister-bernard/bernard-bootstrap`](https://github.com/mister-bernard/bernard-bootstrap)
+   and runs its `setup.sh`. You get battle-tested templates for identity,
+   soul, agents, and tools, plus an operational playbook. Customize from
+   there.
+2. **Default OpenClaw** — runs `npm install -g openclaw` and drops in blank
+   placeholder files. Fastest path if you want to write everything
+   yourself.
+3. **Abort** — set up the workspace by hand and re-run `install.sh`.
+
+For non-interactive installs (CI, `curl | bash`), set `OC_BOOTSTRAP` to
+pin the choice: `bernard`, `default`, or `skip`. The default on a
+non-TTY stdin is `bernard`.
+
 ## Daily use
 
 ```bash
