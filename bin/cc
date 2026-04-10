@@ -81,7 +81,7 @@ cmd_start() {
 
     if session_exists; then
         info "attaching to existing cc session"
-        exec tmux_cc attach -t "$SESSION"
+        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$SESSION"
     fi
 
     info "starting new cc session on socket '$SOCKET'"
@@ -99,7 +99,7 @@ cmd_start() {
     dim "  ask the lead: 'create a team with N teammates...' (try: cc roles)"
     echo
     sleep 0.3
-    exec tmux_cc attach -t "$SESSION"
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$SESSION"
 }
 
 cmd_sync() {
