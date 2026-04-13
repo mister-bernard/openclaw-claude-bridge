@@ -10,8 +10,8 @@ The `cc` command — CLAUDE.md synthesizer, tmux session launcher, and role pres
 |------|------|
 | [bernard-bootstrap](https://github.com/mister-bernard/bernard-bootstrap) | Master entry point — templates, playbooks, provisioning |
 | [bernard-skills](https://github.com/mister-bernard/bernard-skills) | Skill packages (voice, stego, Twitter, SMS) |
-| **cc-bridge** (private) | Persistent CC sessions as OpenAI-compatible HTTP endpoint |
-| **openclaw-1** (private) | Modified OpenClaw fork |
+| **cc-bridge** (private) | Persistent CC sessions gateway |
+
 
 ## Setup
 To clone all ecosystem repos at once:
