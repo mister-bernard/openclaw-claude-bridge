@@ -15,10 +15,22 @@ set -euo pipefail
 #   CLAUDE_MD_PATH  default: ~/CLAUDE.md
 # ============================================================================
 
-OC_WORKSPACE="${OC_WORKSPACE:-${HOME}/.openclaw/workspace}"
-CLAUDE_MD="${CLAUDE_MD_PATH:-${HOME}/CLAUDE.md}"
-BRIDGE_DIR="${HOME}/.openclaw/bridge"
+# Resolve the canonical OpenClaw home from this script's own location, NOT
+# from $HOME. Secondary Claude harnesses (e.g. claude-b) run with HOME
+# overridden to their own config dir, which would otherwise point OC_WORKSPACE
+# at a nonexistent nested path. The script is always installed at
+#   <OC_HOME>/.openclaw/bridge/lib/bridge.sh
+# so we walk four levels up to recover <OC_HOME>.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OC_HOME="${OC_HOME:-$(cd "${_SCRIPT_DIR}/../../.." && pwd)}"
+
+OC_WORKSPACE="${OC_WORKSPACE:-${OC_HOME}/.openclaw/workspace}"
+CLAUDE_MD="${CLAUDE_MD_PATH:-${OC_HOME}/CLAUDE.md}"
+BRIDGE_DIR="${OC_HOME}/.openclaw/bridge"
 BACKUP_SUFFIX="$(date +%Y%m%d-%H%M%S)"
+CORE_DIR="${OC_HOME}/.openclaw/core"
+NTK_READY=false
+[[ -f "${CORE_DIR}/persona.md" && -f "${CORE_DIR}/rules-public.md" ]] && NTK_READY=true
 
 REQUIRED_FILES=(
     "${OC_WORKSPACE}/IDENTITY.md"
@@ -170,13 +182,99 @@ INTEROP
     echo "generated CLAUDE.md: ${lines} lines, ${size} bytes"
 }
 
+# ── NeedToKnow scoped generation ─────────────────────────────────────────────
+
+# synthesize_l0: minimal public bundle (persona + public rules only)
+# Intended for Wire channel and untrusted callers.
+synthesize_l0() {
+    local out="${OC_HOME}/CLAUDE-l0.md"
+    local tmp="${out}.tmp.$$"
+    {
+        cat <<'HDR'
+# CLAUDE.md (L0 — Public/Untrusted Channel)
+
+This session operates under public channel rules.
+Only the Mr. Bernard public persona is available. No system details,
+no operator identity, no infrastructure context.
+
+---
+
+HDR
+        sed '/^<!--/d; /^-->/d' "${CORE_DIR}/persona.md"
+        echo ""
+        echo "---"
+        echo ""
+        sed '/^<!--/d; /^-->/d' "${CORE_DIR}/rules-public.md"
+    } > "$tmp"
+    mv "$tmp" "$out"
+    local lines size
+    lines=$(wc -l < "$out")
+    size=$(wc -c < "$out")
+    echo "generated CLAUDE-l0.md: ${lines} lines, ${size} bytes"
+}
+
+# create_l3_link: CLAUDE-l3.md → CLAUDE.md (same content, explicit label)
+create_l3_link() {
+    ln -sf "${CLAUDE_MD}" "${OC_HOME}/CLAUDE-l3.md"
+    echo "linked CLAUDE-l3.md → CLAUDE.md"
+}
+
+# Keep sync.log bounded. Cron runs every 30 min and `cc` backgrounds extra syncs
+# on startup, so the file grows monotonically without this. Truncate in place to
+# the last 500 lines once it exceeds ~256 KB. Done inline (no logrotate dep).
+rotate_log() {
+    local log="${OC_HOME}/.openclaw/bridge/sync.log"
+    [[ -f "$log" ]] || return 0
+    local size
+    size=$(wc -c < "$log" 2>/dev/null || echo 0)
+    if (( size > 262144 )); then
+        tail -n 500 "$log" > "${log}.tmp" && mv "${log}.tmp" "$log"
+    fi
+}
+
 case "${1:-sync}" in
     sync)
+        # Serialize concurrent runs. Cron fires every 30 min; `cc`, `cc new`,
+        # and `cc sync` can all background-kick the bridge, so three processes
+        # racing on CLAUDE.md write + memory rsync is plausible. flock on a
+        # dedicated lockfile keeps them single-file. -w 60 waits up to 60 s
+        # before giving up; -E 0 makes the "couldn't acquire" exit be 0 so a
+        # queued second cron run is silent rather than logging an error.
+        LOCKFILE="${OC_HOME}/.openclaw/bridge/.sync.lock"
+        exec 200>"$LOCKFILE"
+        if ! flock -w 60 200; then
+            echo "sync: another run holds the lock, skipping" >&2
+            exit 0
+        fi
+
         check_prereqs
         backup_existing
         synthesize
+        rotate_log
+        ;;
+    sync-all)
+        # Generates all scoped bundles: CLAUDE.md (L3) + CLAUDE-l0.md + CLAUDE-l3.md symlink.
+        # Requires NTK directory structure (core/persona.md, core/rules-public.md).
+        # Falls back to sync-only if NTK files are missing.
+        LOCKFILE="${OC_HOME}/.openclaw/bridge/.sync.lock"
+        exec 200>"$LOCKFILE"
+        if ! flock -w 60 200; then
+            echo "sync-all: another run holds the lock, skipping" >&2
+            exit 0
+        fi
+        check_prereqs
+        backup_existing
+        synthesize
+        if $NTK_READY; then
+            synthesize_l0
+            create_l3_link
+            echo "sync-all: all scoped bundles generated"
+        else
+            echo "sync-all: NTK core files not ready, skipped scoped generation" >&2
+        fi
+        rotate_log
         ;;
     *)
-        die "unknown command: $1 (try 'sync')"
+        die "unknown command: $1 (try 'sync' or 'sync-all')"
         ;;
 esac
