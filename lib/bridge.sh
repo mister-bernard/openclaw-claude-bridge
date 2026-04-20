@@ -40,6 +40,9 @@ REQUIRED_FILES=(
     "${OC_WORKSPACE}/TOOLS.md"
 )
 
+CC_MEMORY_DIR="${OC_HOME}/.claude/projects/-home-openclaw/memory"
+OC_WORKSPACE_MEMORY="${OC_WORKSPACE}/memory"
+
 die() { echo "bridge.sh: $*" >&2; exit 1; }
 
 check_prereqs() {
@@ -232,6 +235,84 @@ rotate_log() {
     fi
 }
 
+# ── Bidirectional memory sync ─────────────────────────────────────────────────
+
+# sync_cc_to_oc: mirror Claude Code memory → OC workspace/memory/cc-memory/
+# so cc-bridge sessions and OpenClaw agents can read CC's persistent facts.
+sync_cc_to_oc() {
+    [[ -d "$CC_MEMORY_DIR" ]] || return 0
+    local dest="${OC_WORKSPACE_MEMORY}/cc-memory"
+    mkdir -p "$dest"
+    # Exclude the oc-memory/ subdir we write in the other direction (no loops)
+    rsync -a --delete \
+        --exclude='oc-memory/' \
+        --exclude='oc-memory-index.md' \
+        "${CC_MEMORY_DIR}/" "${dest}/"
+    local count
+    count=$(find "$dest" -name '*.md' | wc -l)
+    echo "sync_cc_to_oc: ${count} files → workspace/memory/cc-memory/"
+}
+
+# sync_oc_to_cc: mirror key OC workspace memory → CC memory/oc-memory/
+# Skips dated session logs (YYYY-MM-DD*.md) and large files (>50KB).
+# Generates a MEMORY.md-compatible index file so CC sessions can find OC facts.
+sync_oc_to_cc() {
+    [[ -d "$OC_WORKSPACE_MEMORY" ]] || return 0
+    local dest="${CC_MEMORY_DIR}/oc-memory"
+    mkdir -p "$dest"
+    # Sync only named .md files — skip dated session logs, transient reports, PII contacts
+    # Use find+cp rather than rsync patterns (rsync char-classes are unreliable across versions)
+    rm -f "${dest}"/*.md  # clear stale files before re-populating
+    while IFS= read -r -d '' f; do
+        local base
+        base=$(basename "$f")
+        # Skip: dated session logs (YYYY-MM-DD*.md), daily notes, portfolio reports, contact files
+        [[ "$base" =~ ^[0-9]{4}-[0-9]{2} ]] && continue
+        [[ "$base" =~ ^daily- ]] && continue
+        [[ "$base" =~ portfolio-report ]] && continue
+        [[ "$base" =~ ^contacts- ]] && continue
+        cp -p "$f" "${dest}/${base}"
+    done < <(find "${OC_WORKSPACE_MEMORY}" -maxdepth 1 -name '*.md' -print0)
+    local count
+    count=$(find "$dest" -maxdepth 1 -name '*.md' | wc -l)
+
+    # Regenerate the CC-formatted index file so MEMORY.md can reference it.
+    local index_file="${CC_MEMORY_DIR}/oc-memory-index.md"
+    {
+        cat <<'FRONT'
+---
+name: OpenClaw Memory Index
+description: Key OC workspace memory files — facts, preferences, decisions, operational context, entities, servers, glucose profile
+type: reference
+---
+
+OpenClaw workspace memory files are mirrored at `~/.claude/projects/-home-openclaw/memory/oc-memory/`.
+Read specific files directly by path when you need detailed context.
+
+## Key files
+
+FRONT
+        for f in "${dest}"/*.md; do
+            [[ -f "$f" ]] || continue
+            local name
+            name=$(basename "$f" .md)
+            local size
+            size=$(wc -l < "$f")
+            echo "- [\`${name}.md\`](oc-memory/${name}.md) — ${size} lines"
+        done
+        echo ""
+        echo "Last synced: $(date -u '+%Y-%m-%d %H:%M UTC')"
+    } > "$index_file"
+
+    # Ensure MEMORY.md has an entry for oc-memory-index.md
+    local memory_md="${CC_MEMORY_DIR}/MEMORY.md"
+    if [[ -f "$memory_md" ]] && ! grep -q "oc-memory-index" "$memory_md"; then
+        echo "- [OpenClaw Memory Index](oc-memory-index.md) — OC workspace: facts, preferences, decisions, operational context, entities" >> "$memory_md"
+    fi
+
+    echo "sync_oc_to_cc: ${count} files → memory/oc-memory/ + index updated"
+}
+
 case "${1:-sync}" in
     sync)
         # Serialize concurrent runs. Cron fires every 30 min; `cc`, `cc new`,
@@ -250,6 +331,8 @@ case "${1:-sync}" in
         check_prereqs
         backup_existing
         synthesize
+        sync_cc_to_oc
+        sync_oc_to_cc
         rotate_log
         ;;
     sync-all)
@@ -265,6 +348,8 @@ case "${1:-sync}" in
         check_prereqs
         backup_existing
         synthesize
+        sync_cc_to_oc
+        sync_oc_to_cc
         if $NTK_READY; then
             synthesize_l0
             create_l3_link
