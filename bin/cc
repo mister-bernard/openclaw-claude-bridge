@@ -184,8 +184,10 @@ next_session_name() {
     printf "%s-%d" "$DEFAULT_SESSION" "$i"
 }
 
-# Create a new detached cc session with the given name and launch claude
-# in the first pane. Caller is responsible for attaching.
+# Create a new detached cc session with the given name. By default the
+# session is split into CC_PANES vertical columns (default 5), each running
+# claude on the chosen account. Set CC_PANES=1 to get the old single-pane
+# behavior. Caller is responsible for attaching.
 # Args: $1 = session name, $2 = account id (optional; falls back to active)
 create_session() {
     local name="$1"
@@ -197,13 +199,57 @@ create_session() {
         warn "  cc launches a local Claude Code tmux session; pick an account with a claude_bin."
         exit 1
     fi
-    info "starting new cc session '$name' on socket '$SOCKET' (account $acct_id)"
+
+    local panes="${CC_PANES:-5}"
+    if ! [[ "$panes" =~ ^[0-9]+$ ]] || (( panes < 1 || panes > 9 )); then
+        warn "CC_PANES must be an integer 1-9 (got: $panes); falling back to 5"
+        panes=5
+    fi
+
+    info "starting new cc session '$name' on socket '$SOCKET' (account $acct_id, $panes vertical panes)"
     tmux_cc new-session -d -s "$name" -c "$WORKDIR" \
         -x "$(tput cols 2>/dev/null || echo 200)" \
         -y "$(tput lines 2>/dev/null || echo 50)"
-    # Name the first pane so the status bar shows which account is running.
-    tmux_cc select-pane -t "${name}.1" -T "lead[${acct_id}]"
-    tmux_cc send-keys  -t "${name}.1" "$cli" Enter
+
+    if (( panes == 1 )); then
+        tmux_cc select-pane -t "${name}.1" -T "lead[${acct_id}]"
+        tmux_cc send-keys  -t "${name}.1" "$cli" Enter
+        return 0
+    fi
+
+    # Multi-pane default: vertical columns, claude in each.
+    tmux_cc set-option -t "$name" pane-border-status top
+    tmux_cc set-option -t "$name" pane-border-format ' #{pane_title} '
+
+    local i
+    for (( i = 1; i < panes; i++ )); do
+        tmux_cc split-window -h -t "${name}:1" -c "$WORKDIR"
+    done
+    tmux_cc select-layout -t "${name}:1" even-horizontal
+
+    # Resolve actual pane indices left-to-right (handles pane-base-index)
+    local -a pidx=()
+    while IFS= read -r p; do pidx+=("$p"); done < <(
+        tmux_cc list-panes -t "${name}:1" -F '#{pane_left} #{pane_index}' | sort -n | awk '{print $2}'
+    )
+
+    # Pane styling: first pane is the lead, others are workers.
+    local -a colors=("colour129" "colour196" "colour46" "colour39" "colour226" "colour208" "colour51" "colour201" "colour33")
+    local n=${#pidx[@]}
+    for (( i = 0; i < n; i++ )); do
+        local title
+        if (( i == 0 )); then
+            title="lead[${acct_id}]"
+        else
+            title="p$((i+1))[${acct_id}]"
+        fi
+        tmux_cc select-pane -t "${name}:1.${pidx[$i]}" \
+            -T "$title" -P "fg=${colors[$i]},bg=default"
+        tmux_cc send-keys -t "${name}:1.${pidx[$i]}" "$cli" Enter
+    done
+
+    # Focus the lead.
+    tmux_cc select-pane -t "${name}:1.${pidx[0]}"
 }
 
 # Scan args for a leading `-a X` / `-a:X` / `--account X` / `--account=X`
@@ -684,6 +730,9 @@ ${C_BOLD}cc${C_RESET} — OpenClaw + Claude Code daily-driver wrapper
 ${C_BOLD}USAGE${C_RESET}
   cc [-a <id>]          Start or attach the default 'main' session.
                         -a picks a specific account for this launch only.
+                        New sessions open as 5 vertical panes, each running
+                        claude on the chosen account. Override with
+                        CC_PANES=N (1-9), e.g. CC_PANES=1 cc.
   cc new [-a <id>] [name]
                         Create another parallel session (auto-named main-2,
                         main-3, … if no name given). -a overrides the default

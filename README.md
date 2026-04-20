@@ -173,12 +173,25 @@ All parallel sessions share the isolated `cc` tmux socket, so they stay
 out of your personal tmux sessions. `cc ls` and `cc status` show the
 full roster; `cc kill <name>` takes them down one at a time.
 
+### Default layout: 5 vertical panes
+
+A new `cc` session opens as **5 vertical columns**, each running `claude`
+on the chosen account. The leftmost pane is the lead (titled `lead[A]`,
+`lead[B]`, …); the others are peer workers (`p2[A]`, `p3[A]`, …) you can
+hand independent jobs without burning context in the lead. Override with
+`CC_PANES=N` (1–9):
+
+```bash
+CC_PANES=1 cc          # classic single-pane lead
+CC_PANES=3 cc new -a B # 3-pane session on account B
+```
+
 Inside the session (prefix = `Ctrl-b`):
 
 | Keys                 | What it does                                 |
 | -------------------- | -------------------------------------------- |
 | `Ctrl-b B`           | Horizontal bars layout (stacked top-to-bottom) |
-| `Ctrl-b H`           | Vertical columns layout                      |
+| `Ctrl-b H`           | Vertical columns layout (default)            |
 | `Ctrl-b T`           | Tiled layout                                 |
 | Mouse wheel          | Scroll back (100k lines)                     |
 | `Shift+PageUp/Down`  | Keyboard scrollback                          |
