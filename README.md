@@ -73,15 +73,78 @@ non-TTY stdin is `bernard`.
 cc                      # start or attach the default 'main' session
 cc new                  # start another parallel session (auto-named main-2, …)
 cc new deploy           # …or with an explicit name
-cc ls                   # list all cc sessions
+cc ls                   # list all cc sessions + accounts
 cc attach main-2        # attach to a specific session
 cc sync                 # regenerate ~/CLAUDE.md from the workspace
 cc status               # show session and workspace state (all sessions)
 cc roles                # list available role presets
 cc preset full-stack    # print the full-stack preset prompt (paste into lead)
+cc use B                # set the global default account (see Accounts)
+cc -a B                 # start main on a specific account (one-off)
+cc new -a B deploy      # start a named parallel session on account B
 cc kill                 # kill the default session (with confirmation)
 cc kill main-2          # …or kill a specific session
 cc help                 # full usage
+```
+
+### Accounts
+
+`cc` can launch Claude Code against one of several accounts defined in
+`~/.tokenburn.json` — the same file the [`tb`](https://github.com/mister-bernard/tools/tree/main/tb)
+dashboard reads. One account is the global default (`active_account`);
+any other account can be picked per-launch with `-a <id>`.
+
+Each account entry looks like:
+
+```json
+{
+  "id": "B",
+  "name": "Assistant (messaging/email)",
+  "provider": "anthropic",
+  "claude_bin": "/home/you/.local/bin/claude-b",
+  "usage_profile": "backup"
+}
+```
+
+- `claude_bin` — the launcher this account uses (often a wrapper that
+  sets `HOME` to a separate `.claude/` directory so OAuth tokens don't
+  collide). Accounts without a `claude_bin` (e.g. API-only providers)
+  are listed in `cc ls` but can't be launched as a tmux session.
+- `provider` — free-form label; used by companion tooling to gate
+  provider-specific behavior (e.g. rotation policies).
+- `usage_profile` — key into `~/.anthropic-usage/usage-clean.json`;
+  `cc ls` surfaces each account's live 5h/7d usage percentages from
+  that file when available.
+
+**Switching is manual.** `cc use B` writes the new `active_account` to
+`~/.tokenburn.json` (delegating to `~/scripts/cc-switch.sh` if present,
+which also handles bridge rotation). `cc -a B` / `cc new -a B` launches
+a one-off session without flipping the global default — useful when
+you want to briefly hop accounts for a single tmux session.
+
+> **Anthropic ToS note:** rotating between multiple Anthropic accounts
+> to circumvent usage limits is not permitted. Keep account switching
+> manual and purpose-driven (e.g. one account for development, another
+> for personal-assistant automations). Rotation tooling for other
+> providers whose terms permit it is out of scope for this repo.
+
+### Favorites
+
+`cc fav add <key> <name> [workdir] [claude-bin]` registers a named
+shortcut you can launch with `cc <key>` (e.g. `cc gc` for Giant Cedar).
+Favorites live in `~/.cc-favorites.json`. Each favorite can also carry
+a `color` field (`green`, `yellow`, `red`, `magenta`, `cyan`, `orange`,
+`blue`, or a literal `#hex`) — `cc <key>` then paints the tmux window
+name, pane-active border, and status-left accent in that color so it's
+obvious which context you're in at a glance.
+
+```json
+{
+  "gc": { "name": "Giant Cedar", "workdir": "~/giant-cedar",
+          "claude_bin": "claude", "color": "green" },
+  "pv": { "name": "PV Fund",     "workdir": "~/projects/pv-fund",
+          "claude_bin": "claude", "color": "yellow" }
+}
 ```
 
 ### Parallel sessions

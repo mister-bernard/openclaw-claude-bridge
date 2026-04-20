@@ -34,6 +34,9 @@ DEFAULT_SESSION="main"
 SOCKET="cc"
 CLAUDE_MD="${HOME}/CLAUDE.md"
 WORKDIR="${CC_WORKDIR:-${HOME}}"
+FAVORITES_FILE="${HOME}/.cc-favorites.json"
+ACCOUNTS_FILE="${HOME}/.tokenburn.json"
+USAGE_FILE="${HOME}/.anthropic-usage/usage-clean.json"
 
 # ---- Colors for output ------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -51,6 +54,102 @@ info()  { printf "%s[cc]%s %s\n" "$C_BLUE" "$C_RESET" "$*"; }
 warn()  { printf "%s[cc]%s %s\n" "$C_RED"  "$C_RESET" "$*" >&2; }
 ok()    { printf "%s[cc]%s %s\n" "$C_GREEN" "$C_RESET" "$*"; }
 dim()   { printf "%s%s%s\n" "$C_DIM" "$*" "$C_RESET"; }
+
+# ---- Account resolution -----------------------------------------------------
+# Accounts are defined in ~/.tokenburn.json (shared with `tb` dashboard).
+# Each account has: id, name, claude_bin, provider, usage_profile.
+# `active_account` is the global default used when -a is not specified.
+
+# Print the claude binary path for a given account id (or the active default).
+# Args: $1 = account id (optional)
+account_claude_bin() {
+    local want="${1:-}"
+    [[ -f "$ACCOUNTS_FILE" ]] || { echo "claude"; return 0; }
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" ACCT_ID="$want" python3 <<'PY'
+import json, os, sys
+cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+want = os.environ.get("ACCT_ID") or cfg.get("active_account", "A")
+for a in cfg.get("accounts", []):
+    if a.get("id") == want:
+        cli = a.get("claude_bin")
+        if not cli:
+            # Account exists but has no claude_bin (e.g. API-only provider).
+            sys.exit(2)
+        print(cli)
+        sys.exit(0)
+# Unknown id — fall back to default binary on PATH.
+print("claude")
+PY
+}
+
+# Print "A", "B", etc. — the active account id.
+active_account_id() {
+    [[ -f "$ACCOUNTS_FILE" ]] || { echo "A"; return 0; }
+    python3 -c "import json; print(json.load(open('$ACCOUNTS_FILE')).get('active_account','A'))" 2>/dev/null || echo "A"
+}
+
+# Print a friendly name for a given id.
+account_name() {
+    local want="$1"
+    [[ -f "$ACCOUNTS_FILE" ]] || { echo "$want"; return 0; }
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" ACCT_ID="$want" python3 <<'PY' 2>/dev/null || echo "$want"
+import json, os
+cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+for a in cfg.get("accounts", []):
+    if a.get("id") == os.environ["ACCT_ID"]:
+        print(a.get("name", a["id"]))
+        break
+else:
+    print(os.environ["ACCT_ID"])
+PY
+}
+
+# Verify an account id exists; exit 1 with a message otherwise.
+account_exists() {
+    local want="$1"
+    [[ -f "$ACCOUNTS_FILE" ]] || return 1
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" ACCT_ID="$want" python3 <<'PY' 2>/dev/null
+import json, os, sys
+cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+ids = [a.get("id") for a in cfg.get("accounts", [])]
+sys.exit(0 if os.environ["ACCT_ID"] in ids else 1)
+PY
+}
+
+# ---- Favorite styling -------------------------------------------------------
+# Map a color name to a hex value used by the tmux theme. Unknown names fall
+# through to the default accent (matches the base tmux.conf).
+color_hex() {
+    case "${1:-}" in
+        green)    echo "#3fb950" ;;
+        yellow)   echo "#e3b341" ;;
+        red)      echo "#f85149" ;;
+        magenta)  echo "#d2a8ff" ;;
+        cyan)     echo "#39c5cf" ;;
+        orange)   echo "#f0883e" ;;
+        blue|"")  echo "#2a7ba0" ;;
+        *)        echo "${1}" ;;   # assume caller passed a literal hex like #abc123
+    esac
+}
+
+# Apply friendly-name + color styling to an existing cc tmux session.
+# Args: $1 = session name (tmux key), $2 = display name, $3 = color name
+style_session() {
+    local key="$1" display="$2" color="${3:-}"
+    local hex; hex="$(color_hex "$color")"
+
+    # Window name shows in the status bar's window list — this is the most
+    # reliable place to surface the friendly name since pane titles can be
+    # overwritten by OSC sequences from the running program.
+    tmux_cc rename-window -t "${key}:1" "$display" 2>/dev/null || true
+
+    # Per-session border + status-left accent colors.
+    tmux_cc set-option -t "$key" pane-active-border-style "fg=${hex}" 2>/dev/null || true
+    tmux_cc set-option -t "$key" status-left \
+        "#[bg=${hex},fg=#0e1116,bold] ${display} #[bg=#0e1116,fg=${hex}] #S #[fg=#3d4450]│ " \
+        2>/dev/null || true
+    tmux_cc set-option -t "$key" status-left-length 60 2>/dev/null || true
+}
 
 # ---- Prereq checks ----------------------------------------------------------
 need_cmd() {
@@ -87,21 +186,60 @@ next_session_name() {
 
 # Create a new detached cc session with the given name and launch claude
 # in the first pane. Caller is responsible for attaching.
+# Args: $1 = session name, $2 = account id (optional; falls back to active)
 create_session() {
     local name="$1"
-    info "starting new cc session '$name' on socket '$SOCKET'"
+    local acct_id="${2:-$(active_account_id)}"
+    local cli rc=0
+    cli="$(account_claude_bin "$acct_id")" || rc=$?
+    if (( rc == 2 )); then
+        warn "account '$acct_id' has no claude_bin configured (API-only provider?)"
+        warn "  cc launches a local Claude Code tmux session; pick an account with a claude_bin."
+        exit 1
+    fi
+    info "starting new cc session '$name' on socket '$SOCKET' (account $acct_id)"
     tmux_cc new-session -d -s "$name" -c "$WORKDIR" \
         -x "$(tput cols 2>/dev/null || echo 200)" \
         -y "$(tput lines 2>/dev/null || echo 50)"
-    # Name the first pane "lead" so the status bar shows who's who.
-    tmux_cc select-pane -t "${name}.1" -T "lead"
-    tmux_cc send-keys  -t "${name}.1" "claude" Enter
+    # Name the first pane so the status bar shows which account is running.
+    tmux_cc select-pane -t "${name}.1" -T "lead[${acct_id}]"
+    tmux_cc send-keys  -t "${name}.1" "$cli" Enter
+}
+
+# Scan args for a leading `-a X` / `-a:X` / `--account X` / `--account=X`
+# flag and print its value (empty if absent). Does not mutate "$@".
+extract_account_flag() {
+    while (( $# )); do
+        case "$1" in
+            -a|--account)      printf '%s' "${2:-}"; return 0 ;;
+            -a:*|--account=*)  printf '%s' "${1#*[:=]}"; return 0 ;;
+            *)                 shift ;;
+        esac
+    done
+    printf ''
+}
+
+# Print positional args with any -a / --account flag (+ its value) stripped.
+strip_account_flag() {
+    while (( $# )); do
+        case "$1" in
+            -a|--account)      shift 2 || shift ;;
+            -a:*|--account=*)  shift ;;
+            *)                 printf '%s\n' "$1"; shift ;;
+        esac
+    done
 }
 
 # ---- Commands ---------------------------------------------------------------
 
 cmd_start() {
     sanity_check || exit 1
+
+    local acct_flag
+    acct_flag="$(extract_account_flag "$@")"
+    if [[ -n "$acct_flag" ]] && ! account_exists "$acct_flag"; then
+        warn "unknown account: $acct_flag (see 'cc ls')"; exit 1
+    fi
 
     # Sync CLAUDE.md in the background so we don't delay session start.
     if [[ -x "$BRIDGE_LIB" ]]; then
@@ -113,7 +251,7 @@ cmd_start() {
         exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
     fi
 
-    create_session "$DEFAULT_SESSION"
+    create_session "$DEFAULT_SESSION" "$acct_flag"
 
     ok "session ready — attaching"
     echo
@@ -130,7 +268,15 @@ cmd_start() {
 cmd_new() {
     sanity_check || exit 1
 
-    local name="${1:-}"
+    local acct_flag
+    acct_flag="$(extract_account_flag "$@")"
+    if [[ -n "$acct_flag" ]] && ! account_exists "$acct_flag"; then
+        warn "unknown account: $acct_flag (see 'cc ls')"; exit 1
+    fi
+
+    local -a rest=()
+    mapfile -t rest < <(strip_account_flag "$@")
+    local name="${rest[0]:-}"
     if [[ -z "$name" ]]; then
         name="$(next_session_name)"
     elif session_exists "$name"; then
@@ -142,7 +288,7 @@ cmd_new() {
         ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
     fi
 
-    create_session "$name"
+    create_session "$name" "$acct_flag"
 
     ok "session '$name' ready — attaching"
     echo
@@ -173,10 +319,64 @@ cmd_attach() {
 }
 
 cmd_ls() {
+    # Accounts section — shared with `tb` dashboard via ~/.tokenburn.json
+    if [[ -f "$ACCOUNTS_FILE" ]]; then
+        printf "%sAccounts%s  (default marked with *)\n" "$C_BOLD" "$C_RESET"
+        ACCOUNTS_FILE="$ACCOUNTS_FILE" USAGE_FILE="$USAGE_FILE" python3 <<'PY'
+import json, os
+cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+active = cfg.get("active_account", "A")
+usage = {}
+u_path = os.environ.get("USAGE_FILE", "")
+try:
+    if u_path and os.path.exists(u_path):
+        usage = json.load(open(u_path)).get("profiles", {})
+except Exception:
+    usage = {}
+for a in cfg.get("accounts", []):
+    aid = a.get("id", "?")
+    mark = "*" if aid == active else " "
+    name = a.get("name", "")
+    prov = a.get("provider", "?")
+    cli = a.get("claude_bin") or "(api-only)"
+    profile = a.get("usage_profile", "")
+    upct = ""
+    prof = usage.get(profile, {}) if profile else {}
+    sess = prof.get("currentSession", {}).get("percentUsed")
+    week = prof.get("weeklyLimits", {}).get("allModels", {}).get("percentUsed")
+    if sess is not None or week is not None:
+        upct = f"  [5h:{sess or 0:>3}% · 7d:{week or 0:>3}%]"
+    print(f"  {mark} {aid:<2} {name:<36} {prov:<10} {os.path.basename(cli):<10}{upct}")
+PY
+        echo
+        dim "  cc use <id>        set default account (global — writes ~/.tokenburn.json)"
+        dim "  cc new -a <id>     launch a session on a specific account (one-off)"
+        dim "  cc -a <id>         launch main session on a specific account (one-off)"
+        echo
+    fi
+
+    # Show favorites
+    if [[ -f "$FAVORITES_FILE" ]]; then
+        printf "%sFavorites%s\n" "$C_BOLD" "$C_RESET"
+        python3 -c "
+import json
+favs = json.load(open('$FAVORITES_FILE'))
+for key, f in favs.items():
+    name = f.get('name', key)
+    cli = f.get('claude_bin', 'claude')
+    acct = 'B' if 'claude-b' in cli else 'A'
+    print(f'  {key:<10} {name:<24} acct:{acct}')
+" 2>/dev/null
+        echo
+    fi
+
     if ! tmux_cc list-sessions >/dev/null 2>&1; then
         info "no cc sessions running"
         dim "  cc           start the default 'main' session"
         dim "  cc new       start a fresh parallel session"
+        if [[ -f "$FAVORITES_FILE" ]]; then
+            dim "  cc <fav>     launch a favorite (see above)"
+        fi
         return 0
     fi
     printf "%scc sessions%s\n" "$C_BOLD" "$C_RESET"
@@ -309,22 +509,196 @@ cmd_preset() {
     awk 'BEGIN{skip=1} /^#/ && skip {skip=0; next} {print}' "$file" | sed '1{/^$/d}'
 }
 
+cmd_use() {
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        warn "usage: cc use <account-id>   (e.g. cc use A)"
+        echo
+        cmd_ls
+        exit 1
+    fi
+    if ! account_exists "$target"; then
+        warn "unknown account: $target (see 'cc ls')"; exit 1
+    fi
+
+    local current
+    current="$(active_account_id)"
+    if [[ "$current" == "$target" ]]; then
+        info "already on account $target ($(account_name "$target"))"
+        exit 0
+    fi
+
+    # Delegate to cc-switch.sh if present — it also rotates bridges and
+    # updates openclaw.json's primary model pointer. Falls back to a simple
+    # JSON rewrite if the switch script isn't installed.
+    local switch_sh="${HOME}/scripts/cc-switch.sh"
+    if [[ -x "$switch_sh" ]]; then
+        bash "$switch_sh" "$target"
+    else
+        ACCOUNTS_FILE="$ACCOUNTS_FILE" ACCT_ID="$target" python3 <<'PY'
+import json, os
+p = os.environ["ACCOUNTS_FILE"]
+d = json.load(open(p))
+d["active_account"] = os.environ["ACCT_ID"]
+open(p, "w").write(json.dumps(d, indent=2) + "\n")
+PY
+        ok "default account → $target ($(account_name "$target"))"
+    fi
+}
+
+cmd_fav() {
+    local subcmd="${1:-list}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        list)
+            if [[ ! -f "$FAVORITES_FILE" ]]; then
+                info "no favorites configured"
+                dim "  cc fav add <shortcut> <name> [workdir] [claude-bin]"
+                dim "  example: cc fav add gc 'Giant Cedar' ~/projects/giant-cedar"
+                return 0
+            fi
+            printf "%sFavorites%s\n\n" "$C_BOLD" "$C_RESET"
+            python3 -c "
+import json, sys
+try:
+    favs = json.load(open('$FAVORITES_FILE'))
+    for key, f in favs.items():
+        name = f.get('name', key)
+        wd = f.get('workdir', '~')
+        cli = f.get('claude_bin', 'claude')
+        cli_short = 'B' if 'claude-b' in cli else 'A'
+        color = f.get('color', '-')
+        print(f'  {key:<8} {name:<20} dir:{wd:<30} acct:{cli_short}  color:{color}')
+except Exception as e:
+    print(f'  error: {e}', file=sys.stderr)
+"
+            echo
+            dim "  cc <shortcut>       launch or attach a favorite"
+            dim "  cc fav add ...      add a new favorite"
+            dim "  cc fav rm <key>     remove a favorite"
+            ;;
+        add)
+            local key="$1" name="$2" wd="${3:-$HOME}" cli="${4:-claude}"
+            if [[ -z "$key" || -z "$name" ]]; then
+                warn "usage: cc fav add <shortcut> <name> [workdir] [claude-bin]"
+                return 1
+            fi
+            python3 -c "
+import json, os, sys
+path = '$FAVORITES_FILE'
+try:
+    favs = json.load(open(path)) if os.path.exists(path) else {}
+except: favs = {}
+favs['$key'] = {'name': '$name', 'workdir': '$wd', 'claude_bin': '$cli'}
+with open(path, 'w') as f:
+    json.dump(favs, f, indent=2)
+print(f'  added: $key → $name')
+"
+            ;;
+        rm|remove)
+            local key="$1"
+            if [[ -z "$key" ]]; then
+                warn "usage: cc fav rm <shortcut>"
+                return 1
+            fi
+            python3 -c "
+import json, os
+path = '$FAVORITES_FILE'
+favs = json.load(open(path)) if os.path.exists(path) else {}
+if '$key' in favs:
+    del favs['$key']
+    with open(path, 'w') as f:
+        json.dump(favs, f, indent=2)
+    print(f'  removed: $key')
+else:
+    print(f'  not found: $key')
+"
+            ;;
+        *)  warn "unknown fav command: $subcmd" ;;
+    esac
+}
+
+# Launch a favorited session — looks up config, creates/attaches tmux session
+launch_favorite() {
+    local key="$1"
+    sanity_check || exit 1
+
+    local fav_json
+    fav_json=$(python3 -c "
+import json, sys
+favs = json.load(open('$FAVORITES_FILE'))
+f = favs.get('$key')
+if f:
+    print(json.dumps(f))
+else:
+    sys.exit(1)
+" 2>/dev/null) || { warn "favorite '$key' not found"; exit 1; }
+
+    local name workdir cli color
+    name=$(echo "$fav_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['name'])")
+    workdir=$(echo "$fav_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('workdir','$HOME'))")
+    cli=$(echo "$fav_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('claude_bin','claude'))")
+    color=$(echo "$fav_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('color',''))")
+
+    # Expand ~ in workdir
+    workdir="${workdir/#\~/$HOME}"
+
+    if [[ -x "$BRIDGE_LIB" ]]; then
+        ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
+    fi
+
+    if session_exists "$key"; then
+        info "attaching to favorite '$key' ($name)"
+        style_session "$key" "$name" "$color"
+        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$key"
+    fi
+
+    info "starting favorite '$key' ($name${color:+ · $color}) → $cli in $workdir"
+    tmux_cc new-session -d -s "$key" -c "$workdir" \
+        -x "$(tput cols 2>/dev/null || echo 200)" \
+        -y "$(tput lines 2>/dev/null || echo 50)"
+    tmux_cc select-pane -t "${key}.1" -T "$name"
+    tmux_cc send-keys  -t "${key}.1" "$cli" Enter
+    style_session "$key" "$name" "$color"
+
+    ok "favorite '$key' ready — attaching"
+    sleep 0.3
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$key"
+}
+
+# Check if a command matches a favorite shortcut
+is_favorite() {
+    [[ -f "$FAVORITES_FILE" ]] || return 1
+    python3 -c "
+import json, sys
+favs = json.load(open('$FAVORITES_FILE'))
+sys.exit(0 if '$1' in favs else 1)
+" 2>/dev/null
+}
+
 cmd_help() {
     cat <<EOF
 ${C_BOLD}cc${C_RESET} — OpenClaw + Claude Code daily-driver wrapper
 
 ${C_BOLD}USAGE${C_RESET}
-  cc                    Start or attach the default 'main' session
-  cc new [name]         Create another parallel session (auto-named main-2,
-                        main-3, … if no name given). Use this in a second
-                        terminal tab to run two workflows side-by-side.
-  cc ls                 List all cc sessions
+  cc [-a <id>]          Start or attach the default 'main' session.
+                        -a picks a specific account for this launch only.
+  cc new [-a <id>] [name]
+                        Create another parallel session (auto-named main-2,
+                        main-3, … if no name given). -a overrides the default
+                        account for this session only.
+  cc ls                 List all cc sessions and available accounts
+  cc use <id>           Set the default account globally (writes
+                        ~/.tokenburn.json, rotates bridges via cc-switch.sh)
   cc attach <name>      Attach to a specific session
   cc sync               Regenerate ~/CLAUDE.md from the OpenClaw workspace
   cc kill [name]        Kill a session (default: main, with confirmation)
   cc status [name]      Show session / workspace status
   cc roles              List available role presets
   cc preset <name>      Print a preset prompt (copy-paste into the lead)
+  cc fav [add|rm|list]  Manage favorite session shortcuts
+  cc <shortcut>         Launch a favorited session (e.g. cc gc)
   cc help               This message
 
 ${C_BOLD}INSIDE THE SESSION${C_RESET}
@@ -347,16 +721,31 @@ EOF
 
 # ---- Dispatch ---------------------------------------------------------------
 
-case "${1:-start}" in
-    ""|start)   cmd_start ;;
+_cmd="${1:-start}"
+# If the first arg is a flag (e.g. `cc -a B`), treat it as `cc start -a B`.
+if [[ "$_cmd" == -* ]]; then
+    cmd_start "$@"
+    exit $?
+fi
+case "$_cmd" in
+    ""|start)   shift 2>/dev/null || true; cmd_start "$@" ;;
     new)        shift; cmd_new "$@" ;;
     ls|list)    cmd_ls ;;
+    use)        shift; cmd_use "$@" ;;
     attach)     shift; cmd_attach "$@" ;;
     sync)       cmd_sync ;;
     kill)       shift; cmd_kill "$@" ;;
     status)     shift; cmd_status "$@" ;;
     roles)      cmd_roles ;;
     preset)     shift; cmd_preset "$@" ;;
+    fav)        shift; cmd_fav "$@" ;;
     help|-h|--help) cmd_help ;;
-    *)          warn "unknown command: $1"; echo; cmd_help; exit 1 ;;
+    *)
+        # Check if it's a favorite shortcut before failing
+        if is_favorite "$_cmd"; then
+            launch_favorite "$_cmd"
+        else
+            warn "unknown command: $_cmd"; echo; cmd_help; exit 1
+        fi
+        ;;
 esac

@@ -1,0 +1,1652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🔍 Claude Code System Architecture</title>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --card: #111827;
+    --card2: #0f172a;
+    --border: #1e2d45;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --blue: #3b82f6;
+    --purple: #8b5cf6;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --cyan: #06b6d4;
+    --pink: #ec4899;
+    --indigo: #6366f1;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  #particles-js {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  .wrapper {
+    position: relative;
+    z-index: 1;
+    padding: 24px;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+
+  /* HEADER */
+  .header {
+    text-align: center;
+    margin-bottom: 32px;
+    padding: 32px;
+    background: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(139,92,246,0.08));
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--blue), var(--purple), var(--green));
+  }
+  .header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 8px;
+  }
+  .header .subtitle {
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+  }
+
+  /* STATS ROW */
+  .stats-row {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .stat {
+    flex: 1;
+    min-width: 120px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+  .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    display: block;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .stat-label {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .stat.blue .stat-value { color: var(--blue); }
+  .stat.purple .stat-value { color: var(--purple); }
+  .stat.green .stat-value { color: var(--green); }
+  .stat.amber .stat-value { color: var(--amber); }
+  .stat.cyan .stat-value { color: var(--cyan); }
+
+  /* COLUMNS */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+  .full-width {
+    margin-bottom: 20px;
+  }
+
+  /* SECTION */
+  .section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .section-header {
+    padding: 12px 16px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header.blue { background: linear-gradient(135deg, rgba(59,130,246,0.15), rgba(59,130,246,0.05)); color: var(--blue); }
+  .section-header.purple { background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(139,92,246,0.05)); color: var(--purple); }
+  .section-header.green { background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(16,185,129,0.05)); color: var(--green); }
+  .section-header.amber { background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(245,158,11,0.05)); color: var(--amber); }
+  .section-header.red { background: linear-gradient(135deg, rgba(239,68,68,0.15), rgba(239,68,68,0.05)); color: var(--red); }
+  .section-header.cyan { background: linear-gradient(135deg, rgba(6,182,212,0.15), rgba(6,182,212,0.05)); color: var(--cyan); }
+  .section-header.gold { background: linear-gradient(135deg, rgba(251,191,36,0.15), rgba(245,158,11,0.05)); color: #fbbf24; }
+
+  .section-body { padding: 16px; }
+
+  /* SERVICE */
+  .service {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .service:last-child { margin-bottom: 0; }
+  .service-info { flex: 1; min-width: 0; }
+  .service-name {
+    font-weight: 600;
+    font-size: 12px;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .service-desc { color: var(--muted); font-size: 10px; }
+  .service-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+
+  /* DOT */
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 4px;
+  }
+  .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+  .dot.dead { background: var(--red); box-shadow: 0 0 4px var(--red); }
+  .dot.idle { background: var(--muted); }
+
+  /* TAG */
+  .tag {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .tag.blue { background: rgba(59,130,246,0.15); color: var(--blue); }
+  .tag.purple { background: rgba(139,92,246,0.15); color: var(--purple); }
+  .tag.green { background: rgba(16,185,129,0.15); color: var(--green); }
+  .tag.amber { background: rgba(245,158,11,0.15); color: var(--amber); }
+  .tag.red { background: rgba(239,68,68,0.15); color: var(--red); }
+  .tag.cyan { background: rgba(6,182,212,0.15); color: var(--cyan); }
+  .tag.muted { background: rgba(100,116,139,0.15); color: var(--muted); }
+
+  /* FLOW ROW */
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+    font-size: 11px;
+  }
+  .flow-row:last-child { margin-bottom: 0; }
+  .flow-node {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .flow-node.blue { border-color: rgba(59,130,246,0.4); color: var(--blue); }
+  .flow-node.purple { border-color: rgba(139,92,246,0.4); color: var(--purple); }
+  .flow-node.green { border-color: rgba(16,185,129,0.4); color: var(--green); }
+  .flow-node.amber { border-color: rgba(245,158,11,0.4); color: var(--amber); }
+  .flow-node.red { border-color: rgba(239,68,68,0.4); color: var(--red); }
+  .flow-node.cyan { border-color: rgba(6,182,212,0.4); color: var(--cyan); }
+  .flow-arrow { color: var(--muted); font-size: 12px; }
+
+  /* NTK LEVELS */
+  .ntk-levels { display: flex; flex-direction: column; gap: 6px; }
+  .ntk-level {
+    border-radius: 6px;
+    padding: 8px 12px;
+    border-left: 3px solid;
+    font-size: 11px;
+  }
+  .ntk-level .level-name { font-weight: 700; font-size: 11px; margin-bottom: 2px; }
+  .ntk-level .level-desc { color: var(--muted); font-size: 10px; }
+  .ntk-level.l0 { border-color: var(--red); background: rgba(239,68,68,0.07); }
+  .ntk-level.l1 { border-color: var(--amber); background: rgba(245,158,11,0.07); }
+  .ntk-level.l2 { border-color: var(--blue); background: rgba(59,130,246,0.07); }
+  .ntk-level.l3 { border-color: var(--green); background: rgba(16,185,129,0.07); }
+  .ntk-level.l4 { border-color: var(--purple); background: rgba(139,92,246,0.07); }
+
+  /* CRON TABLE */
+  .cron-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+  }
+  .cron-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+  }
+  .cron-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid rgba(30,45,69,0.5);
+    vertical-align: middle;
+  }
+  .cron-table tr.paused td {
+    color: var(--muted);
+    text-decoration: line-through;
+    opacity: 0.5;
+  }
+  .cron-table tr.paused td:first-child { text-decoration: none; }
+  .cron-table td:first-child { color: var(--cyan); font-weight: 600; white-space: nowrap; }
+  .cron-table td.type-llm { color: var(--purple); }
+  .cron-table td.type-alert { color: var(--red); }
+  .cron-table td.type-sync { color: var(--blue); }
+  .cron-table td.type-git { color: var(--green); }
+  .cron-table td.type-sec { color: var(--amber); }
+
+  /* CLUSTER / MEMORY DIAGRAM */
+  .memory-diagram {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 0;
+    align-items: start;
+    margin-bottom: 16px;
+  }
+  .cluster {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    background: rgba(255,255,255,0.02);
+  }
+  .cluster.cc { border-color: rgba(59,130,246,0.5); }
+  .cluster.oc { border-color: rgba(16,185,129,0.5); }
+  .cluster-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .cluster-title.blue { color: var(--blue); }
+  .cluster-title.green { color: var(--green); }
+  .cluster-item {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    font-size: 10px;
+  }
+  .cluster-item:last-child { margin-bottom: 0; }
+  .cluster-item .item-path { color: var(--cyan); font-size: 10px; margin-bottom: 2px; }
+  .cluster-item .item-desc { color: var(--muted); font-size: 9px; }
+  .cluster-item .item-type { display: inline-block; font-size: 8px; padding: 1px 4px; border-radius: 2px; margin-top: 3px; }
+
+  /* SYNC LAYER */
+  .sync-layer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0 16px;
+    gap: 16px;
+    min-width: 200px;
+  }
+  .sync-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+  }
+  .sync-arrow-line {
+    width: 100%;
+    height: 2px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .sync-arrow-line::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    height: 2px;
+  }
+  .sync-arrow-line.exists::before { background: var(--green); }
+  .sync-arrow-line.proposed::before { background: var(--amber); border-top: 2px dashed var(--amber); height: 0; }
+  .sync-arrow-line.missing::before { background: var(--red); border-top: 2px dashed var(--red); height: 0; }
+  .sync-arrow-label {
+    font-size: 9px;
+    text-align: center;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .sync-arrow-label.exists { background: rgba(16,185,129,0.15); color: var(--green); }
+  .sync-arrow-label.proposed { background: rgba(245,158,11,0.15); color: var(--amber); border: 1px dashed rgba(245,158,11,0.5); }
+  .sync-arrow-label.missing { background: rgba(239,68,68,0.15); color: var(--red); border: 1px dashed rgba(239,68,68,0.5); }
+
+  .sync-visual {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+  .sync-row {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 8px;
+  }
+  .sync-line-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+  .sync-connector {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 5px;
+    font-size: 10px;
+    width: 100%;
+    border: 1px dashed;
+  }
+  .sync-connector.exists { border-color: var(--green); background: rgba(16,185,129,0.07); color: var(--green); }
+  .sync-connector.proposed { border-color: var(--amber); background: rgba(245,158,11,0.07); color: var(--amber); }
+  .sync-connector.missing { border-color: var(--red); background: rgba(239,68,68,0.07); color: var(--red); }
+  .sync-connector .badge {
+    font-size: 8px;
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-weight: 700;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .sync-connector.exists .badge { background: rgba(16,185,129,0.2); color: var(--green); }
+  .sync-connector.proposed .badge { background: rgba(245,158,11,0.2); color: var(--amber); }
+  .sync-connector.missing .badge { background: rgba(239,68,68,0.2); color: var(--red); }
+
+  /* DISK BAR */
+  .disk-bar-container {
+    margin: 12px 0;
+  }
+  .disk-bar-track {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    height: 24px;
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 6px;
+  }
+  .disk-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--amber), var(--red));
+    border-radius: 6px;
+    transition: width 0.3s ease;
+    position: relative;
+  }
+  .disk-bar-fill::after {
+    content: '97% USED';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    font-weight: 700;
+    color: white;
+  }
+  .disk-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  .disk-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+    margin-top: 12px;
+  }
+  .disk-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+  }
+  .disk-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(30,45,69,0.5);
+    vertical-align: middle;
+  }
+  .disk-table td:nth-child(2) { color: var(--red); font-weight: 700; text-align: right; }
+  .disk-table td:nth-child(3) { color: var(--muted); }
+  .disk-table tr:last-child td { border-bottom: none; }
+
+  /* DIR TREE */
+  .dir-tree {
+    background: var(--card2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    font-size: 11px;
+    line-height: 1.8;
+  }
+  .dir-tree .tree-line { display: flex; gap: 6px; }
+  .dir-tree .tree-prefix { color: var(--muted); white-space: pre; }
+  .dir-tree .tree-dir { color: var(--blue); font-weight: 600; }
+  .dir-tree .tree-comment { color: var(--muted); font-size: 10px; }
+
+  /* MODEL TABLE */
+  .model-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+  }
+  .model-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+  }
+  .model-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(30,45,69,0.5);
+    vertical-align: middle;
+  }
+  .model-table tr:last-child td { border-bottom: none; }
+  .model-table td:nth-child(1) { color: var(--cyan); font-weight: 600; }
+  .model-table td:nth-child(2) { color: var(--purple); }
+
+  /* FOOTER NOTE */
+  .footer-note {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: rgba(139,92,246,0.07);
+    border: 1px solid rgba(139,92,246,0.2);
+    border-radius: 5px;
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1.6;
+  }
+
+  .warn-note {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: rgba(239,68,68,0.07);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-left: 3px solid var(--red);
+    border-radius: 5px;
+    color: #fca5a5;
+    font-size: 10px;
+    line-height: 1.6;
+  }
+
+  .info-note {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: rgba(59,130,246,0.07);
+    border: 1px solid rgba(59,130,246,0.2);
+    border-radius: 5px;
+    color: #93c5fd;
+    font-size: 10px;
+    line-height: 1.6;
+  }
+
+  /* PORTS */
+  .port {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(6,182,212,0.12);
+    color: var(--cyan);
+    font-weight: 600;
+    margin-left: 4px;
+  }
+
+  /* SECTION DIVIDER LABEL */
+  .section-num {
+    display: inline-block;
+    background: var(--border);
+    color: var(--muted);
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-right: 4px;
+  }
+
+  /* THREE COL */
+  .three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+
+  @media (max-width: 1200px) {
+    .two-col { grid-template-columns: 1fr; }
+    .three-col { grid-template-columns: 1fr; }
+    .memory-diagram { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div id="particles-js" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none"></div>
+
+<div class="wrapper">
+
+  <!-- HEADER -->
+  <div class="header">
+    <h1>🔍 Claude Code System Architecture</h1>
+    <div class="subtitle">VPS &nbsp;·&nbsp; 2026-04-20 &nbsp;·&nbsp; Post Reorganization &nbsp;·&nbsp; claude-sonnet-4-6</div>
+  </div>
+
+  <!-- STATS ROW -->
+  <div class="stats-row">
+    <div class="stat blue">
+      <span class="stat-value">28</span>
+      <span class="stat-label">Live Services</span>
+    </div>
+    <div class="stat purple">
+      <span class="stat-value">2</span>
+      <span class="stat-label">PM2 Processes</span>
+    </div>
+    <div class="stat green">
+      <span class="stat-value">18</span>
+      <span class="stat-label">Active Crons</span>
+    </div>
+    <div class="stat amber">
+      <span class="stat-value" style="font-size:20px">11 paused</span>
+      <span class="stat-label">Paused Crons</span>
+    </div>
+    <div class="stat cyan">
+      <span class="stat-value">5</span>
+      <span class="stat-label">NTK Levels</span>
+    </div>
+    <div class="stat" style="">
+      <span class="stat-value" style="color:var(--pink)">4</span>
+      <span class="stat-label">CC Sessions</span>
+    </div>
+  </div>
+
+  <!-- SECTION 1 + 2: Inbound + AI Core -->
+  <div class="two-col">
+
+    <!-- SECTION 1: INBOUND CHANNELS -->
+    <div class="section">
+      <div class="section-header blue">
+        <span class="section-num">01</span>
+        Inbound Channels
+      </div>
+      <div class="section-body">
+
+        <div class="flow-row">
+          <span class="flow-node blue">Telegram (G · @gmacd)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node purple">telegraph :18901</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node green">cc-bridge session-g</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node" style="border-color:rgba(239,68,68,0.4);color:var(--red)">Wire (public)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node">wire-bridge</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node">the-wire</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node red">L0 (public rules)</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node blue">Signal (+12084004000)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node cyan">signal-cli :8080</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node purple">OpenClaw router</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node amber">SMS (Telnyx)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node cyan">telnyx-sms :8443</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node purple">OpenClaw router</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node green">Voice (Retell AI)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node cyan">retell-backend :8446</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node purple">cc-bridge</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node amber">Voice (Telnyx)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node cyan">telnyx-voice :8444</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node purple">OpenClaw router</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node blue">Email (mailbox.org)</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node">email-processor cron */2m</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node purple">OpenClaw router</span>
+        </div>
+
+        <div class="flow-row">
+          <span class="flow-node green">mrb.sh/call</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node cyan">call-queue :5055</span>
+          <span class="flow-arrow">→</span>
+          <span class="flow-node red">claude --print (bypassPermissions)</span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- SECTION 2: AI BRIDGE CORE -->
+    <div class="section">
+      <div class="section-header purple">
+        <span class="section-num">02</span>
+        AI Bridge Core
+      </div>
+      <div class="section-body">
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">cc-bridge (Account A) <span class="port">:18790</span></div>
+            <div class="service-desc">PRIMARY — OpenAI-compatible API → persistent Claude Code sessions</div>
+            <div class="service-desc" style="margin-top:3px">Sessions: session-g · session-groups · session-wire · session-yujin</div>
+            <div class="service-tags">
+              <span class="tag purple">Primary</span>
+              <span class="tag blue">Sonnet 4.6</span>
+              <span class="tag green">Account A</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">cc-bridge-b (Account B) <span class="port">:18791</span></div>
+            <div class="service-desc">Overflow + parallel tasks</div>
+            <div class="service-tags">
+              <span class="tag blue">Sonnet 4.6</span>
+              <span class="tag cyan">Account B</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot warn"></div>
+          <div class="service-info">
+            <div class="service-name">OpenClaw Gateway <span class="port">:18789</span></div>
+            <div class="service-desc">Pure API gateway (NO TG binding). LLM router: Anthropic, Minimax, DeepSeek</div>
+            <div class="service-desc" style="color:var(--amber);margin-top:3px">⚠ Restarted 2026-04-20 as pure gateway</div>
+            <div class="service-tags">
+              <span class="tag amber">Multi-LLM</span>
+              <span class="tag muted">25 aliases</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">telegraph <span class="port">:18901</span></div>
+            <div class="service-desc">TG orchestrator → cc-bridge session routing. Replaced OpenClaw TG handler. ~1050 LOC, zero deps</div>
+            <div class="service-tags">
+              <span class="tag green">routes→CC</span>
+              <span class="tag blue">Zero deps</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">minimax-proxy</div>
+            <div class="service-desc">PII firewall + usage tracking</div>
+            <div class="service-tags">
+              <span class="tag red">PII Gated</span>
+              <span class="tag muted">External API</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="footer-note">
+          <strong>NTK Session Routing:</strong> wire-* → workspace-l0/ → CLAUDE-l0.md. All other sessions → workspace/ → CLAUDE.md. CWD isolation via cwdBySession()
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 3: MEMORY ARCHITECTURE (FULL WIDTH) -->
+  <div class="full-width">
+    <div class="section">
+      <div class="section-header gold">
+        <span class="section-num">03</span>
+        ⭐ Memory Architecture — Sync Gap &amp; Solution
+      </div>
+      <div class="section-body">
+
+        <div class="memory-diagram">
+
+          <!-- LEFT: CC Memory -->
+          <div class="cluster cc">
+            <div class="cluster-title blue">
+              <span>💻</span> Claude Code (Primary)
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">~/.claude/projects/-home-openclaw/memory/</div>
+              <div class="item-desc">CC persistent memory directory</div>
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">MEMORY.md</div>
+              <div class="item-desc">Index file — loaded every session via system-reminder injection</div>
+              <span class="item-type tag blue">auto-loaded</span>
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">Types</div>
+              <div class="item-desc">user · feedback · project · reference</div>
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">Written by</div>
+              <div class="item-desc">Claude Code sessions (this instance)</div>
+              <span class="item-type tag green">source</span>
+            </div>
+          </div>
+
+          <!-- CENTER: Sync Layer -->
+          <div class="sync-layer">
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;text-align:center;margin-bottom:8px">Sync Layer</div>
+
+            <div class="sync-connector exists" style="margin-bottom:8px">
+              <span>→</span>
+              <div style="flex:1">
+                <div style="font-weight:700;font-size:10px">bridge.sh sync-all</div>
+                <div style="font-size:9px;margin-top:1px;opacity:0.8">every 30min · OC workspace → CLAUDE.md</div>
+              </div>
+              <span class="badge">✓ EXISTS</span>
+            </div>
+
+            <div class="sync-connector missing" style="margin-bottom:8px">
+              <span>←</span>
+              <div style="flex:1">
+                <div style="font-weight:700;font-size:10px">CC memory → OC workspace</div>
+                <div style="font-size:9px;margin-top:1px;opacity:0.8">rsync CC memory → workspace/memory/cc-memory/</div>
+              </div>
+              <span class="badge">✗ MISSING</span>
+            </div>
+
+            <div class="sync-connector proposed" style="margin-bottom:8px">
+              <span>↔</span>
+              <div style="flex:1">
+                <div style="font-weight:700;font-size:10px">rsync pass in bridge.sh cron</div>
+                <div style="font-size:9px;margin-top:1px;opacity:0.8">proposed fix — add to bridge.sh</div>
+              </div>
+              <span class="badge">PROPOSED</span>
+            </div>
+
+            <div class="sync-connector exists">
+              <span>↔</span>
+              <div style="flex:1">
+                <div style="font-weight:700;font-size:10px">shared-context.md</div>
+                <div style="font-size:9px;margin-top:1px;opacity:0.8">cross-session state — already works</div>
+              </div>
+              <span class="badge">✓ LIVE</span>
+            </div>
+          </div>
+
+          <!-- RIGHT: OC Memory -->
+          <div class="cluster oc">
+            <div class="cluster-title green">
+              <span>🐾</span> OpenClaw (Supporting)
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">~/.openclaw/memory/</div>
+              <div class="item-desc">OC native memory files</div>
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">~/.openclaw/workspace/</div>
+              <div class="item-desc">Projects, scripts, context, tasks</div>
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">~/CLAUDE.md</div>
+              <div class="item-desc">Synthesized bundle (L3) — ~500 lines</div>
+              <span class="item-type tag amber">auto-generated</span>
+            </div>
+            <div class="cluster-item">
+              <div class="item-path">workspace/shared-context.md</div>
+              <div class="item-desc">Auto-injected into every cc-bridge session on spawn</div>
+              <span class="item-type tag green">cross-session</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- GAP WARNING -->
+        <div class="warn-note">
+          <strong>⚠ Current Gap:</strong> CC memory writes (this session's facts, decisions, glucose profile, feedback entries etc.) are <strong>NOT visible</strong> to cc-bridge/session-g or OpenClaw until synced back to OC workspace. These exist only in <code style="background:rgba(239,68,68,0.15);padding:1px 4px;border-radius:2px">~/.claude/projects/-home-openclaw/memory/</code> and the system-reminder injection.
+          <br><br>
+          <strong>Fix:</strong> Add <code style="background:rgba(239,68,68,0.15);padding:1px 4px;border-radius:2px">rsync ~/.claude/projects/-home-openclaw/memory/ ~/.openclaw/workspace/memory/cc-memory/</code> as an additional pass in <code style="background:rgba(239,68,68,0.15);padding:1px 4px;border-radius:2px">bridge.sh sync-all</code> cron (runs every 30min, already live). Closes the loop without new infra.
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 4: NTK SECURITY -->
+  <div class="full-width">
+    <div class="section">
+      <div class="section-header red">
+        <span class="section-num">04</span>
+        NTK Security Architecture
+      </div>
+      <div class="section-body">
+        <div style="margin-bottom:10px;color:var(--muted);font-size:10px">5-level need-to-know hierarchy. CLAUDE.md (~500 lines) synthesizes L3 for standard sessions. Wire sessions isolated to L0 only.</div>
+        <div class="ntk-levels">
+          <div class="ntk-level l0">
+            <div class="level-name" style="color:var(--red)">L0 — Public Rules</div>
+            <div class="level-desc">workspace-l0/ · CLAUDE-l0.md · Wire sessions · Public channel rules only · No identity exposure</div>
+          </div>
+          <div class="ntk-level l1">
+            <div class="level-name" style="color:var(--amber)">L1 — Identity Layer</div>
+            <div class="level-desc">~/.openclaw/identity/ · Mr. Bernard persona · Public-facing voice · Role definitions</div>
+          </div>
+          <div class="ntk-level l2">
+            <div class="level-name" style="color:var(--blue)">L2 — Operational Context</div>
+            <div class="level-desc">~/.openclaw/core/ · Agent rules · Service configs · Cron schedules · Tool references</div>
+          </div>
+          <div class="ntk-level l3">
+            <div class="level-name" style="color:var(--green)">L3 — Full Context (CLAUDE.md)</div>
+            <div class="level-desc">~/CLAUDE.md synthesized bundle · All rules + memory + services · Standard G sessions · ~500 lines</div>
+          </div>
+          <div class="ntk-level l4">
+            <div class="level-name" style="color:var(--purple)">L4 — Vault / Credentials</div>
+            <div class="level-desc">~/.openclaw/vault.kdbx · API keys · SSH keys · Financial data · G-session only · Never in CLAUDE.md</div>
+          </div>
+        </div>
+        <div class="info-note" style="margin-top:10px">
+          <strong>Session routing:</strong> telegraph routes Telegram→session-g (L3). Wire→session-wire (L0). Groups→session-groups (L2). CWD isolation via cwdBySession() in cc-bridge. Each session loads only its authorized NTK level.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 5 + 6: Web + Business -->
+  <div class="two-col">
+
+    <!-- SECTION 5: WEB SERVICES -->
+    <div class="section">
+      <div class="section-header green">
+        <span class="section-num">05</span>
+        Web Services
+      </div>
+      <div class="section-body">
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">mrb.sh <span class="port">:3000</span></div>
+            <div class="service-desc">Main hub — nginx proxy, status, dashboard, public pages</div>
+            <div class="service-tags"><span class="tag green">nginx</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">NIS (North Idaho Sunsets) <span class="port">:3001</span></div>
+            <div class="service-desc">North Idaho Sunsets site</div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">N-Number.org <span class="port">:3003</span></div>
+            <div class="service-desc">Aviation N-number tracking &amp; marketplace</div>
+            <div class="service-tags"><span class="tag blue">Aviation</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">CS 153 Foundry <span class="port">:3153</span></div>
+            <div class="service-desc">Course infrastructure foundry</div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">Thesis Narrative <span class="port">:3200</span></div>
+            <div class="service-desc">Thesis narrative web service</div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">harness-pulse <span class="port">:3010</span></div>
+            <div class="service-desc">Daily AI tool adoption dashboard — scores 16 tools. PM2 managed.</div>
+            <div class="service-tags"><span class="tag purple">PM2</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">harness-pulse-reply</div>
+            <div class="service-desc">Reply handler for harness-pulse. PM2 managed.</div>
+            <div class="service-tags"><span class="tag purple">PM2</span></div>
+          </div>
+        </div>
+
+        <div class="service" style="opacity:0.45">
+          <div class="dot dead"></div>
+          <div class="service-info">
+            <div class="service-name">fart-tracker <span style="text-decoration:line-through;font-weight:normal;color:var(--muted)">:3847</span></div>
+            <div class="service-desc">Archived 2026-04-20 — YAMNet gas detection PWA</div>
+            <div class="service-tags"><span class="tag muted">Archived</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- SECTION 6: BUSINESS & FINANCE -->
+    <div class="section">
+      <div class="section-header amber">
+        <span class="section-num">06</span>
+        Business &amp; Finance
+      </div>
+      <div class="section-body">
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">IBKR Gateway (Docker)</div>
+            <div class="service-desc">Interactive Brokers API gateway — containerized</div>
+            <div class="service-tags"><span class="tag amber">Trading</span><span class="tag blue">Docker</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">market-proxy <span class="port">:3077-3079</span></div>
+            <div class="service-desc">Market data proxy cluster — 3 ports</div>
+            <div class="service-tags"><span class="tag amber">Market data</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">DeFi Dashboard <span class="port">:3300</span></div>
+            <div class="service-desc">Decentralized finance dashboard &amp; analytics</div>
+            <div class="service-tags"><span class="tag green">DeFi</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">DeFi Persistence</div>
+            <div class="service-desc">DeFi state persistence layer &amp; event store</div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">wp-factory</div>
+            <div class="service-desc">White paper factory — SAM/grants/SBIR scanner, generator, tracker. Dashboard: mrb.sh/wp/</div>
+            <div class="service-tags"><span class="tag purple">LLM</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">GC A/B Tracker <span class="port">:3011</span></div>
+            <div class="service-desc">Giant Cedar A/B test tracker — AlpineEditorial vs MinimalistArchitect</div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">PV Dashboard <span class="port">:5000</span></div>
+            <div class="service-desc">Auth required. Health-checked via Slater Mac Mini (WireGuard 10.8.0.2)</div>
+            <div class="service-tags"><span class="tag red">Auth required</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">PV Demo Dashboard <span class="port">:5001</span></div>
+            <div class="service-desc">Demo instance. Cloudflare blocks direct VPS checks — uses Slater Mini.</div>
+            <div class="service-tags"><span class="tag muted">Demo</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 7 + 8: Infra + Directory -->
+  <div class="two-col">
+
+    <!-- SECTION 7: INFRASTRUCTURE -->
+    <div class="section">
+      <div class="section-header cyan">
+        <span class="section-num">07</span>
+        Infrastructure
+      </div>
+      <div class="section-body">
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">channel-logger</div>
+            <div class="service-desc">Logs all channel activity for audit and replay</div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">gc-pipeline</div>
+            <div class="service-desc">Giant Cedar: StorageBox → YouTube + Instagram + TikTok. DJI SRT GPS parsing. Runs */2min cron.</div>
+            <div class="service-tags"><span class="tag green">Pipeline</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">call-queue-worker <span class="port">:5055</span></div>
+            <div class="service-desc">Workers spawning claude --print for incoming call queue tasks</div>
+            <div class="service-tags"><span class="tag red">bypassPermissions</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">signal-cli-daemon <span class="port">:8080</span></div>
+            <div class="service-desc">Signal CLI daemon — JSON-RPC interface for Signal messaging</div>
+            <div class="service-tags"><span class="tag blue">Signal</span></div>
+          </div>
+        </div>
+
+        <div class="service">
+          <div class="dot live"></div>
+          <div class="service-info">
+            <div class="service-name">market-proxy</div>
+            <div class="service-desc">Market data infrastructure layer</div>
+          </div>
+        </div>
+
+        <div class="info-note">
+          <strong>PV dashboards</strong> health-checked via Slater Mac Mini (10.8.0.2 WireGuard) — Cloudflare blocks direct VPS checks. All service restarts use <code style="background:rgba(59,130,246,0.15);padding:1px 4px;border-radius:2px">bash scripts/restart-gateway.sh</code>, never bare systemctl.
+        </div>
+
+      </div>
+    </div>
+
+    <!-- SECTION 8: DIRECTORY STRUCTURE -->
+    <div class="section">
+      <div class="section-header blue">
+        <span class="section-num">08</span>
+        Directory Structure — Post Reorganization 2026-04-20
+      </div>
+      <div class="section-body">
+        <div class="dir-tree">
+          <div class="tree-line"><span class="tree-prefix">~/</span></div>
+          <div class="tree-line"><span class="tree-prefix">├── </span><span class="tree-dir">projects/</span><span class="tree-comment">   # ALL projects (31 dirs, was root-level)</span></div>
+          <div class="tree-line"><span class="tree-prefix">├── </span><span class="tree-dir">scripts/</span><span class="tree-comment">    # System scripts (watchdog, disk-alert, etc.)</span></div>
+          <div class="tree-line"><span class="tree-prefix">├── </span><span class="tree-dir">.openclaw/</span><span class="tree-comment">  # OpenClaw config, workspace, memory</span></div>
+          <div class="tree-line"><span class="tree-prefix">│   ├── </span><span class="tree-dir">workspace/</span><span class="tree-comment">  # Active projects, scripts, tasks</span></div>
+          <div class="tree-line"><span class="tree-prefix">│   ├── </span><span class="tree-dir">memory/</span><span class="tree-comment">     # OpenClaw persistent memory</span></div>
+          <div class="tree-line"><span class="tree-prefix">│   ├── </span><span class="tree-dir">core/</span><span class="tree-comment">       # NTK L2 — agent rules, service configs</span></div>
+          <div class="tree-line"><span class="tree-prefix">│   ├── </span><span class="tree-dir">identity/</span><span class="tree-comment">   # NTK L1 — persona, voice</span></div>
+          <div class="tree-line"><span class="tree-prefix">│   └── </span><span class="tree-dir">agents/</span><span class="tree-comment">     # Agent definitions</span></div>
+          <div class="tree-line"><span class="tree-prefix">├── </span><span class="tree-dir">misc/</span><span class="tree-comment">       # Non-project files</span></div>
+          <div class="tree-line"><span class="tree-prefix">├── </span><span class="tree-dir">archive/</span><span class="tree-comment">    # Archived projects</span></div>
+          <div class="tree-line"><span class="tree-prefix">└── </span><span class="tree-dir">CLAUDE.md</span><span class="tree-comment">   # Synthesized bundle (bridge.sh → here)</span></div>
+        </div>
+        <div class="info-note" style="margin-top:12px">
+          <strong>Key:</strong> 31 symlinks removed 2026-04-20. Service files updated to ~/projects/ paths. 11 services verified running post-reorganization.
+        </div>
+        <div style="margin-top:10px">
+          <div class="service">
+            <div class="dot live"></div>
+            <div class="service-info">
+              <div class="service-name">~/.claude/projects/-home-openclaw/memory/</div>
+              <div class="service-desc">CC memory (primary). MEMORY.md index auto-injected each session.</div>
+              <div class="service-tags"><span class="tag blue">CC memory</span><span class="tag green">auto-injected</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- SECTION 9: CRON SCHEDULE (FULL WIDTH) -->
+  <div class="full-width">
+    <div class="section">
+      <div class="section-header purple">
+        <span class="section-num">09</span>
+        Cron Schedule — 18 Active · 11 Paused
+      </div>
+      <div class="section-body">
+        <table class="cron-table">
+          <thead>
+            <tr>
+              <th>Freq</th>
+              <th>Job</th>
+              <th>Type</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>*/2 min</td>
+              <td>email-processor --mode g</td>
+              <td>—</td>
+              <td>G email scan</td>
+            </tr>
+            <tr>
+              <td>*/5 min</td>
+              <td>service-watchdog.sh</td>
+              <td class="type-alert">alert</td>
+              <td>PV via Slater Mac Mini</td>
+            </tr>
+            <tr>
+              <td>*/5 min</td>
+              <td>refresh-status.sh</td>
+              <td>—</td>
+              <td>mrb.sh status cache</td>
+            </tr>
+            <tr>
+              <td>*/5 min</td>
+              <td>minimax-usage-refresh.sh</td>
+              <td>—</td>
+              <td>Usage tracking</td>
+            </tr>
+            <tr>
+              <td>*/5 min</td>
+              <td>cache-status.sh</td>
+              <td>—</td>
+              <td>Status cache refresh</td>
+            </tr>
+            <tr>
+              <td>*/10 min</td>
+              <td>tokenburn-watchdog.sh</td>
+              <td class="type-alert">NEW</td>
+              <td>Context burn monitor, auto-spawns tasks</td>
+            </tr>
+            <tr>
+              <td>*/30 min</td>
+              <td>email-processor --mode general</td>
+              <td>—</td>
+              <td>General inbox</td>
+            </tr>
+            <tr>
+              <td>*/30 min</td>
+              <td>anthropic-usage cron-api-check.sh</td>
+              <td>—</td>
+              <td>Usage data for tokenburn watchdog</td>
+            </tr>
+            <tr>
+              <td>*/30 min</td>
+              <td>disk-alert.sh</td>
+              <td class="type-alert">alert</td>
+              <td>Disk/CPU/Swap (dedup fixed 2026-04-20)</td>
+            </tr>
+            <tr>
+              <td>*/30 min</td>
+              <td>bridge.sh sync-all</td>
+              <td class="type-sync">sync</td>
+              <td>OC workspace → CLAUDE.md</td>
+            </tr>
+            <tr>
+              <td>hourly</td>
+              <td>task-loop.py</td>
+              <td class="type-llm">LLM</td>
+              <td>Hourly task scan</td>
+            </tr>
+            <tr>
+              <td>hourly</td>
+              <td>auto-commit-mrb.sh</td>
+              <td class="type-git">git</td>
+              <td>Auto-commit mrb.sh changes</td>
+            </tr>
+            <tr>
+              <td>hourly</td>
+              <td>message-routing-audit.py</td>
+              <td class="type-sec">security</td>
+              <td>Route audit</td>
+            </tr>
+            <tr>
+              <td>*/2h</td>
+              <td>task-executor.sh</td>
+              <td class="type-llm">LLM</td>
+              <td>Task executor</td>
+            </tr>
+            <tr>
+              <td>*/4h</td>
+              <td>procurement cache refresh</td>
+              <td>—</td>
+              <td>SAM.gov cache</td>
+            </tr>
+            <tr>
+              <td>*/6h</td>
+              <td>hetzner-backup.sh</td>
+              <td>backup</td>
+              <td>Hetzner StorageBox backup</td>
+            </tr>
+            <tr>
+              <td>*/6h</td>
+              <td>wp-factory scan.sh</td>
+              <td>—</td>
+              <td>White paper scanner</td>
+            </tr>
+            <tr>
+              <td>*/6h</td>
+              <td>procurement spot-check</td>
+              <td>—</td>
+              <td>SAM spot check</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>task-loop.py --digest</td>
+              <td class="type-llm">LLM</td>
+              <td>14:00 UTC daily digest</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>procurement nightly.sh</td>
+              <td class="type-llm">LLM</td>
+              <td>10:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>git-autocommit.sh</td>
+              <td class="type-git">git</td>
+              <td>03:00 + 12:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>memory-maintenance.sh</td>
+              <td>—</td>
+              <td>03:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>session-cleanup.sh</td>
+              <td>—</td>
+              <td>04:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>autoresearch/cron.sh</td>
+              <td class="type-llm">LLM</td>
+              <td>04:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>task expire</td>
+              <td>—</td>
+              <td>08:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>overnight-health-report.sh</td>
+              <td class="type-alert">alert</td>
+              <td>07:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>update-project-index.sh</td>
+              <td>—</td>
+              <td>05:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>idle-session-audit.sh</td>
+              <td>—</td>
+              <td>09:00 UTC</td>
+            </tr>
+            <tr>
+              <td>daily</td>
+              <td>gc-ab-report</td>
+              <td>—</td>
+              <td>09:00 UTC (was weekly)</td>
+            </tr>
+            <tr>
+              <td>weekly</td>
+              <td>secrets-audit.sh</td>
+              <td class="type-sec">security</td>
+              <td>Mon 01:00 UTC</td>
+            </tr>
+
+            <!-- PAUSED -->
+            <tr class="paused">
+              <td>*/5 min</td>
+              <td>war-dashboard</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20 (market crons)</td>
+            </tr>
+            <tr class="paused">
+              <td>*/15 min</td>
+              <td>market-fetch</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20</td>
+            </tr>
+            <tr class="paused">
+              <td>daily</td>
+              <td>amber-daily-refresh</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20</td>
+            </tr>
+            <tr class="paused">
+              <td>hourly</td>
+              <td>check-market-freshness</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20</td>
+            </tr>
+            <tr class="paused">
+              <td>hourly</td>
+              <td>sync-dashboard-data</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20</td>
+            </tr>
+            <tr class="paused">
+              <td>daily</td>
+              <td>pv-market-research</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20</td>
+            </tr>
+            <tr class="paused">
+              <td>daily</td>
+              <td>pv-email-scan</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-20</td>
+            </tr>
+            <tr class="paused">
+              <td>weekly</td>
+              <td>gc-ab weekly</td>
+              <td>—</td>
+              <td>PAUSED (replaced by daily)</td>
+            </tr>
+            <tr class="paused">
+              <td>daily</td>
+              <td>glucose-daily-analysis</td>
+              <td>—</td>
+              <td>Archived</td>
+            </tr>
+            <tr class="paused">
+              <td>daily</td>
+              <td>tradfi-pipeline</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-04</td>
+            </tr>
+            <tr class="paused">
+              <td>daily</td>
+              <td>pnw-flying / pow-scanner</td>
+              <td>—</td>
+              <td>PAUSED 2026-04-04</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 10 + 11: Disk + Model Routing -->
+  <div class="two-col">
+
+    <!-- SECTION 10: DISK USAGE -->
+    <div class="section">
+      <div class="section-header red">
+        <span class="section-num">10</span>
+        ⚠ Disk: 97% Used — Action Required
+      </div>
+      <div class="section-body">
+
+        <div class="disk-bar-container">
+          <div class="disk-bar-track">
+            <div class="disk-bar-fill" style="width:97%"></div>
+          </div>
+          <div class="disk-bar-labels">
+            <span>0 GB</span>
+            <span style="color:var(--red);font-weight:700">70 GB used of 75 GB total &nbsp;·&nbsp; 2.5 GB free</span>
+            <span>75 GB</span>
+          </div>
+        </div>
+
+        <table class="disk-table">
+          <thead>
+            <tr>
+              <th>Directory</th>
+              <th>Size</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>sentinelfire/.venv</td>
+              <td>5.1 GB</td>
+              <td style="color:var(--amber)">Safe to delete (venv, recreatable) — <strong>AWAITING G APPROVAL</strong></td>
+            </tr>
+            <tr>
+              <td>backcountry-bound/node_modules</td>
+              <td>711 MB</td>
+              <td style="color:var(--amber)">Inactive project — <strong>AWAITING G APPROVAL</strong></td>
+            </tr>
+            <tr>
+              <td>north-idaho-sunsets/node_modules</td>
+              <td>71 MB</td>
+              <td style="color:var(--muted)">Inactive project</td>
+            </tr>
+            <tr>
+              <td>faa-registry (raw .txt files)</td>
+              <td>~500 MB</td>
+              <td style="color:var(--muted)">FAA data — potentially reclaimable</td>
+            </tr>
+            <tr>
+              <td>bittensor-venv</td>
+              <td>455 MB</td>
+              <td style="color:var(--muted)">Python venv — recreatable</td>
+            </tr>
+            <tr>
+              <td>mrb-sh/public (built assets)</td>
+              <td>256 MB</td>
+              <td style="color:var(--muted)">Regeneratable build output</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="warn-note" style="margin-top:12px">
+          <strong>Most impactful:</strong> sentinelfire/.venv (5.1 GB) alone would bring disk to ~88%. Awaiting G approval before deletion. Total recoverable (venvs + inactive node_modules): ~6.3 GB → drops to ~85% used.
+        </div>
+
+      </div>
+    </div>
+
+    <!-- SECTION 11: MULTI-MODEL ROUTING -->
+    <div class="section">
+      <div class="section-header purple">
+        <span class="section-num">11</span>
+        Multi-Model Routing
+      </div>
+      <div class="section-body">
+
+        <table class="model-table">
+          <thead>
+            <tr>
+              <th>Route</th>
+              <th>Model</th>
+              <th>Usage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>cc-bridge (local CC)</td>
+              <td>Sonnet 4.6</td>
+              <td>session-g, primary work, all G tasks</td>
+            </tr>
+            <tr>
+              <td>cc-bridge-b (local CC)</td>
+              <td>Sonnet 4.6</td>
+              <td>overflow / parallel tasks</td>
+            </tr>
+            <tr>
+              <td>OpenClaw :18789</td>
+              <td>25 aliases</td>
+              <td>haiku, sonnet, opus, deepseek, minimax</td>
+            </tr>
+            <tr>
+              <td>Minimax (external)</td>
+              <td style="color:var(--red)">M2 Ultra ⚠</td>
+              <td style="color:var(--red)">PII-FREE only. No G data. No contacts.</td>
+            </tr>
+            <tr>
+              <td>DeepSeek (external)</td>
+              <td>R2 / V3</td>
+              <td>Code/analysis tasks (OC-routed)</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="footer-note" style="margin-top:12px">
+          <strong>Routing policy:</strong> CC is primary (Anthropic account A+B). OC gateway = thin proxy for non-CC models. Minimax = PII-firewalled external API — never send G data, contacts, memory content, or financial data. defaults.fallbacks must NOT include Minimax.
+        </div>
+
+        <div style="margin-top:12px">
+          <div style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Account Usage</div>
+          <div class="flow-row">
+            <span class="flow-node green">Account A (cc-bridge :18790)</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-node">Primary · session-g</span>
+          </div>
+          <div class="flow-row">
+            <span class="flow-node blue">Account B (cc-bridge-b :18791)</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-node">Overflow · parallel</span>
+          </div>
+          <div class="flow-row">
+            <span class="flow-node amber">Account C (Minimax)</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-node red">PII-gated · tracked separately</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- FOOTER -->
+  <div style="text-align:center;padding:20px;color:var(--muted);font-size:10px;border-top:1px solid var(--border);margin-top:8px">
+    Generated 2026-04-20 &nbsp;·&nbsp; claude-sonnet-4-6 &nbsp;·&nbsp; /tmp/system-architecture-v2.html &nbsp;·&nbsp; 🔍 Mr. Bernard
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/particles.js@2.0.0/particles.min.js"></script>
+<script>
+particlesJS('particles-js', {
+  particles: {
+    number: { value: 60, density: { enable: true, value_area: 800 } },
+    color: { value: ['#3b82f6', '#8b5cf6', '#10b981'] },
+    shape: { type: 'circle' },
+    opacity: { value: 0.3, random: true },
+    size: { value: 2, random: true },
+    line_linked: { enable: true, distance: 120, color: '#2a3a54', opacity: 0.4, width: 1 },
+    move: { enable: true, speed: 0.8, direction: 'none', random: true, out_mode: 'out' }
+  },
+  interactivity: {
+    detect_on: 'canvas',
+    events: { onhover: { enable: true, mode: 'grab' }, onclick: { enable: false } },
+    modes: { grab: { distance: 140, line_linked: { opacity: 0.6 } } }
+  },
+  retina_detect: true
+});
+</script>
+</body>
+</html>
