@@ -520,9 +520,204 @@ for key, f in favs.items():
         printf "  %-20s %s pane(s)  acct: %-12s%b\n" "$sname" "$panes" "$accts" "$tag"
     done < <(tmux_cc list-sessions -F "#{session_name}	#{session_attached}" 2>/dev/null)
     echo
+
+    # Per-pane account audit — walks every claude child under every cc-socket
+    # pane and reads its HOME from /proc to confirm it matches the session
+    # name's intended account. Mismatches are flagged in red.
+    print_panes_table
+
     dim "  cc attach <name>   attach to a session"
     dim "  cc new [name]      create another parallel session"
     dim "  cc kill <name>     kill a session"
+}
+
+# Walk every pane on the cc tmux socket and emit a one-row-per-pane table.
+# Columns: session, pane#, acct (from /proc HOME), expected (from session
+# name), PID, uptime, [MISMATCH]. Color-coded; mismatches in red.
+print_panes_table() {
+    printf "%scc panes%s\n" "$C_BOLD" "$C_RESET"
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" \
+    DEFAULT_SESSION="$DEFAULT_SESSION" \
+    TMUX_LIST_PANES="$(tmux_cc list-panes -aF '#{session_name}|#{pane_index}|#{pane_pid}|#{pane_start_time}|#{pane_left}' 2>/dev/null)" \
+    C_RED="$C_RED" C_GREEN="$C_GREEN" C_DIM="$C_DIM" C_RESET="$C_RESET" \
+    python3 <<'PY' 2>/dev/null
+import json, os, sys, time
+
+raw = os.environ.get("TMUX_LIST_PANES", "").strip()
+if not raw:
+    print(f"  {os.environ.get('C_DIM','')}no panes on cc socket{os.environ.get('C_RESET','')}")
+    sys.exit(0)
+
+# Build home→id map and id→home map.
+home_to_id, id_to_home = {}, {}
+try:
+    cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+    for a in cfg.get("accounts", []):
+        h = a.get("claude_home")
+        if h:
+            real = os.path.realpath(h.rstrip("/"))
+            home_to_id[real] = a.get("id", "?")
+            id_to_home[a.get("id","?")] = real
+    default_id = cfg.get("active_account", "A")
+except Exception:
+    default_id = "A"
+
+DEFAULT_SESSION = os.environ.get("DEFAULT_SESSION", "main")
+
+def expected_acct_for_session(sname):
+    """main → active; main-B → B; main-2 (numeric suffix) → active."""
+    if sname == DEFAULT_SESSION:
+        return default_id
+    if sname.startswith(DEFAULT_SESSION + "-"):
+        tail = sname[len(DEFAULT_SESSION) + 1:]
+        # Pure-numeric suffix = parallel-on-same-account (cc new auto-names).
+        if tail.isdigit():
+            return default_id
+        # Otherwise treat as account id (case-insensitive).
+        if tail.upper() in id_to_home:
+            return tail.upper()
+    return None  # unknown — favorite or custom name; don't flag
+
+def read_home(pid):
+    try:
+        env = open(f"/proc/{pid}/environ", "rb").read().split(b"\x00")
+    except Exception:
+        return None
+    for kv in env:
+        if kv.startswith(b"HOME="):
+            return kv[5:].decode(errors="replace").rstrip("/")
+    return None
+
+def claude_child(pane_pid):
+    """Return (pid, home) of the first claude descendant of pane_pid, or
+    (None, None) if no claude is running."""
+    seen = set()
+    stack = [pane_pid]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        try:
+            kids = open(f"/proc/{cur}/task/{cur}/children").read().split()
+        except Exception:
+            continue
+        for c in kids:
+            try:
+                cmd = open(f"/proc/{c}/cmdline", "rb").read().replace(b"\x00", b" ").decode(errors="replace")
+            except Exception:
+                continue
+            if "claude" in cmd:
+                return int(c), read_home(c)
+            stack.append(c)
+    return None, None
+
+def fmt_uptime(secs):
+    secs = int(secs)
+    if secs < 60: return f"{secs}s"
+    if secs < 3600: return f"{secs//60}m"
+    if secs < 86400: return f"{secs//3600}h{(secs%3600)//60}m"
+    return f"{secs//86400}d{(secs%86400)//3600}h"
+
+# System boot time + clock tick rate for computing PID uptime from /proc/stat.
+def _boot_time():
+    try:
+        for line in open("/proc/stat"):
+            if line.startswith("btime "):
+                return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+def pid_start_unix(pid):
+    """Return unix epoch when PID started, or 0 on failure."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+        # Field 22 (1-indexed) is starttime in clock ticks since boot.
+        # Process name field (comm) is parenthesized and may contain spaces.
+        rparen = data.rfind(b")")
+        rest = data[rparen+2:].split()
+        starttime_ticks = int(rest[19])  # 22 - 3 (pid, comm, then 0-indexed)
+        ticks = os.sysconf("SC_CLK_TCK") or 100
+        return _boot_time() + starttime_ticks // ticks
+    except Exception:
+        return 0
+
+now = int(time.time())
+C_RED = os.environ.get("C_RED", "")
+C_GREEN = os.environ.get("C_GREEN", "")
+C_DIM = os.environ.get("C_DIM", "")
+C_RESET = os.environ.get("C_RESET", "")
+
+# Header
+print(f"  {C_DIM}{'session':<14} {'p#':<3} {'acct':<5} {'home':<42} {'pid':<8} {'up':<8} {'exp':<5} status{C_RESET}")
+
+rows = []
+for line in raw.splitlines():
+    parts = line.split("|")
+    if len(parts) < 5:
+        continue
+    sname, pidx, ppid, pstart, pleft = parts[0], parts[1], parts[2], parts[3], parts[4]
+    # Prefer tmux pane_start_time if non-empty; otherwise read from /proc.
+    pstart_i = 0
+    try:
+        if pstart.strip():
+            pstart_i = int(pstart)
+    except ValueError:
+        pstart_i = 0
+    if not pstart_i:
+        try:
+            pstart_i = pid_start_unix(int(ppid))
+        except Exception:
+            pstart_i = now
+    rows.append((sname, pleft, pidx, ppid, pstart_i))
+
+# Sort by session, then by pane_left so panes display left-to-right.
+rows.sort(key=lambda r: (r[0], int(r[1]) if r[1].isdigit() else 0))
+
+mismatches = 0
+for sname, _, pidx, ppid, pstart in rows:
+    try:
+        ppid_i = int(ppid)
+    except ValueError:
+        continue
+    cpid, chome = claude_child(ppid_i)
+    expected = expected_acct_for_session(sname)
+    if chome:
+        real = os.path.realpath(chome)
+        actual = home_to_id.get(real, "?")
+    else:
+        actual = "-"
+    # Decide row color. Pad PLAIN text first, then wrap with escapes,
+    # so column widths stay aligned in the terminal output.
+    if expected and actual != "?" and actual != "-" and actual != expected:
+        marker = f"{C_RED}MISMATCH{C_RESET}"
+        mismatches += 1
+        acct_raw, color = actual, C_RED
+    elif actual == "-":
+        marker = f"{C_DIM}(no claude){C_RESET}"
+        acct_raw, color = "-", C_DIM
+    elif actual == "?":
+        marker = f"{C_DIM}unknown{C_RESET}"
+        acct_raw, color = "?", C_DIM
+    else:
+        marker = f"{C_GREEN}ok{C_RESET}"
+        acct_raw, color = actual, C_GREEN
+    acct_col = f"{color}{acct_raw:<5}{C_RESET}"
+    home_disp = chome if chome else "-"
+    if len(home_disp) > 42:
+        home_disp = "…" + home_disp[-41:]
+    up = fmt_uptime(now - pstart)
+    exp_raw = expected if expected else "?"
+    exp_col = exp_raw if expected else f"{C_DIM}?{C_RESET}"
+    # Use fixed-width plain padding; insert pre-padded colored cells inline.
+    print(f"  {sname:<14} {pidx:<3} {acct_col} {home_disp:<42} {ppid:<8} {up:<8} {exp_col:<5} {marker}")
+
+if mismatches:
+    print(f"\n  {C_RED}{mismatches} pane(s) running on the wrong account{C_RESET}")
+PY
+    echo
 }
 
 cmd_sync() {
@@ -871,6 +1066,7 @@ case "$_cmd" in
     ""|start)   shift 2>/dev/null || true; cmd_start "$@" ;;
     new)        shift; cmd_new "$@" ;;
     ls|list)    cmd_ls ;;
+    panes)      print_panes_table ;;
     use)        shift; cmd_use "$@" ;;
     attach)     shift; cmd_attach "$@" ;;
     sync)       cmd_sync ;;

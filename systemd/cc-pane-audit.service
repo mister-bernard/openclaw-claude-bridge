@@ -1,0 +1,16 @@
+[Unit]
+Description=cc tmux pane account-binding audit
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/openclaw/scripts/cc-pane-audit.sh
+StandardOutput=journal
+StandardError=journal
+Environment="PATH=/home/openclaw/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Pass through TG envs if present
+EnvironmentFile=-/home/openclaw/.openclaw/.env
+
+[Install]
+WantedBy=default.target
