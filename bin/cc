@@ -116,6 +116,81 @@ sys.exit(0 if os.environ["ACCT_ID"] in ids else 1)
 PY
 }
 
+# ---- Per-pane account detection ---------------------------------------------
+# For each pane in the given tmux session, walk the pane's shell PID to its
+# child `claude` process and resolve that process's HOME env var. Match it
+# against each account's `claude_home` in ~/.tokenburn.json to identify the
+# account. This is correct even when wrappers like `claude-b` exec into the
+# shared `claude` binary with an overridden HOME (which wipes `.claude-b`
+# from the cmdline — the old cmdline heuristic read those panes as "A").
+# Output examples:
+#   "A"          (all panes on A — collapsed)
+#   "A·B·A·A·A"  (mixed — per-pane left-to-right)
+#   "?"          (no claude running yet, or pane not inspectable)
+session_accounts() {
+    local sname="$1"
+    # Collect pane PIDs (left-to-right by pane_left, matching create_session order)
+    local pids
+    pids=$(tmux_cc list-panes -t "$sname" -F '#{pane_left} #{pane_pid}' 2>/dev/null \
+        | sort -n | awk '{print $2}' | paste -sd ' ' -)
+    [[ -n "$pids" ]] || { echo "?"; return 0; }
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" PIDS="$pids" python3 <<'PY' 2>/dev/null || echo "?"
+import json, os
+# Build {claude_home -> account_id} map so we can match any claude process's
+# HOME to the account that owns that HOME. Normalise paths (strip trailing /).
+home_to_id = {}
+try:
+    cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+    for a in cfg.get("accounts", []):
+        home = a.get("claude_home")
+        if home:
+            home_to_id[os.path.realpath(home.rstrip("/"))] = a.get("id", "?")
+except Exception:
+    pass
+
+def read_home(pid):
+    try:
+        env = open(f"/proc/{pid}/environ", "rb").read().split(b"\x00")
+    except Exception:
+        return None
+    for kv in env:
+        if kv.startswith(b"HOME="):
+            return kv[5:].decode(errors="replace").rstrip("/")
+    return None
+
+def acct_for(pid):
+    try:
+        children = open(f"/proc/{pid}/task/{pid}/children").read().split()
+    except Exception:
+        return "?"
+    for c in children:
+        try:
+            cmd = open(f"/proc/{c}/cmdline","rb").read().replace(b"\x00", b" ").decode(errors="replace")
+        except Exception:
+            continue
+        if "claude" not in cmd:
+            # Recurse one level — covers `bash -c '... claude ...'` wrappers
+            sub = acct_for(c)
+            if sub != "?":
+                return sub
+            continue
+        home = read_home(c)
+        if home:
+            aid = home_to_id.get(os.path.realpath(home))
+            if aid:
+                return aid
+        # Last-resort fallback: inspect cmdline for a tagged wrapper binary.
+        return "B" if ".claude-b" in cmd else "A"
+    return "?"
+
+accts = [acct_for(p) for p in os.environ["PIDS"].split()]
+if accts and len(set(accts)) == 1:
+    print(accts[0])
+else:
+    print("·".join(accts))
+PY
+}
+
 # ---- Favorite styling -------------------------------------------------------
 # Map a color name to a hex value used by the tmux theme. Unknown names fall
 # through to the default accent (matches the base tmux.conf).
@@ -287,19 +362,29 @@ cmd_start() {
         warn "unknown account: $acct_flag (see 'cc ls')"; exit 1
     fi
 
+    # Resolve the session name we want.
+    # When -a <id> is supplied we use a per-account session name (main-<id>)
+    # so launching 'cc -a B' from inside the main(A) session opens a SEPARATE
+    # tmux session on B instead of silently attaching to the existing main.
+    # If -a is omitted we use the conventional default 'main'.
+    local target_session="$DEFAULT_SESSION"
+    if [[ -n "$acct_flag" ]] && [[ "$acct_flag" != "$(active_account_id)" ]]; then
+        target_session="${DEFAULT_SESSION}-${acct_flag}"
+    fi
+
     # Sync CLAUDE.md in the background so we don't delay session start.
     if [[ -x "$BRIDGE_LIB" ]]; then
         ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
     fi
 
-    if session_exists "$DEFAULT_SESSION"; then
-        info "attaching to existing cc session '$DEFAULT_SESSION'"
-        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
+    if session_exists "$target_session"; then
+        info "attaching to existing cc session '$target_session'"
+        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$target_session"
     fi
 
-    create_session "$DEFAULT_SESSION" "$acct_flag"
+    create_session "$target_session" "$acct_flag"
 
-    ok "session ready — attaching"
+    ok "session '$target_session' ready — attaching"
     echo
     dim "  prefix = Ctrl-b  |  scroll = mouse wheel or Shift+PgUp"
     dim "  prefix + B = horizontal bars layout"
@@ -308,7 +393,7 @@ cmd_start() {
     dim "  run 'cc new' in another terminal for a parallel session"
     echo
     sleep 0.3
-    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$target_session"
 }
 
 cmd_new() {
@@ -426,17 +511,213 @@ for key, f in favs.items():
         return 0
     fi
     printf "%scc sessions%s\n" "$C_BOLD" "$C_RESET"
-    local sname attached panes tag
+    local sname attached panes tag accts
     while IFS=$'\t' read -r sname attached; do
         panes=$(tmux_cc list-panes -s -t "$sname" 2>/dev/null | wc -l)
         tag=""
         [[ "$attached" == "1" ]] && tag=" ${C_GREEN}(attached)${C_RESET}"
-        printf "  %-20s %s pane(s)%b\n" "$sname" "$panes" "$tag"
+        accts=$(session_accounts "$sname")
+        printf "  %-20s %s pane(s)  acct: %-12s%b\n" "$sname" "$panes" "$accts" "$tag"
     done < <(tmux_cc list-sessions -F "#{session_name}	#{session_attached}" 2>/dev/null)
     echo
+
+    # Per-pane account audit — walks every claude child under every cc-socket
+    # pane and reads its HOME from /proc to confirm it matches the session
+    # name's intended account. Mismatches are flagged in red.
+    print_panes_table
+
     dim "  cc attach <name>   attach to a session"
     dim "  cc new [name]      create another parallel session"
     dim "  cc kill <name>     kill a session"
+}
+
+# Walk every pane on the cc tmux socket and emit a one-row-per-pane table.
+# Columns: session, pane#, acct (from /proc HOME), expected (from session
+# name), PID, uptime, [MISMATCH]. Color-coded; mismatches in red.
+print_panes_table() {
+    printf "%scc panes%s\n" "$C_BOLD" "$C_RESET"
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" \
+    DEFAULT_SESSION="$DEFAULT_SESSION" \
+    TMUX_LIST_PANES="$(tmux_cc list-panes -aF '#{session_name}|#{pane_index}|#{pane_pid}|#{pane_start_time}|#{pane_left}' 2>/dev/null)" \
+    C_RED="$C_RED" C_GREEN="$C_GREEN" C_DIM="$C_DIM" C_RESET="$C_RESET" \
+    python3 <<'PY' 2>/dev/null
+import json, os, sys, time
+
+raw = os.environ.get("TMUX_LIST_PANES", "").strip()
+if not raw:
+    print(f"  {os.environ.get('C_DIM','')}no panes on cc socket{os.environ.get('C_RESET','')}")
+    sys.exit(0)
+
+# Build home→id map and id→home map.
+home_to_id, id_to_home = {}, {}
+try:
+    cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+    for a in cfg.get("accounts", []):
+        h = a.get("claude_home")
+        if h:
+            real = os.path.realpath(h.rstrip("/"))
+            home_to_id[real] = a.get("id", "?")
+            id_to_home[a.get("id","?")] = real
+    default_id = cfg.get("active_account", "A")
+except Exception:
+    default_id = "A"
+
+DEFAULT_SESSION = os.environ.get("DEFAULT_SESSION", "main")
+
+def expected_acct_for_session(sname):
+    """main → active; main-B → B; main-2 (numeric suffix) → active."""
+    if sname == DEFAULT_SESSION:
+        return default_id
+    if sname.startswith(DEFAULT_SESSION + "-"):
+        tail = sname[len(DEFAULT_SESSION) + 1:]
+        # Pure-numeric suffix = parallel-on-same-account (cc new auto-names).
+        if tail.isdigit():
+            return default_id
+        # Otherwise treat as account id (case-insensitive).
+        if tail.upper() in id_to_home:
+            return tail.upper()
+    return None  # unknown — favorite or custom name; don't flag
+
+def read_home(pid):
+    try:
+        env = open(f"/proc/{pid}/environ", "rb").read().split(b"\x00")
+    except Exception:
+        return None
+    for kv in env:
+        if kv.startswith(b"HOME="):
+            return kv[5:].decode(errors="replace").rstrip("/")
+    return None
+
+def claude_child(pane_pid):
+    """Return (pid, home) of the first claude descendant of pane_pid, or
+    (None, None) if no claude is running."""
+    seen = set()
+    stack = [pane_pid]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        try:
+            kids = open(f"/proc/{cur}/task/{cur}/children").read().split()
+        except Exception:
+            continue
+        for c in kids:
+            try:
+                cmd = open(f"/proc/{c}/cmdline", "rb").read().replace(b"\x00", b" ").decode(errors="replace")
+            except Exception:
+                continue
+            if "claude" in cmd:
+                return int(c), read_home(c)
+            stack.append(c)
+    return None, None
+
+def fmt_uptime(secs):
+    secs = int(secs)
+    if secs < 60: return f"{secs}s"
+    if secs < 3600: return f"{secs//60}m"
+    if secs < 86400: return f"{secs//3600}h{(secs%3600)//60}m"
+    return f"{secs//86400}d{(secs%86400)//3600}h"
+
+# System boot time + clock tick rate for computing PID uptime from /proc/stat.
+def _boot_time():
+    try:
+        for line in open("/proc/stat"):
+            if line.startswith("btime "):
+                return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+def pid_start_unix(pid):
+    """Return unix epoch when PID started, or 0 on failure."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+        # Field 22 (1-indexed) is starttime in clock ticks since boot.
+        # Process name field (comm) is parenthesized and may contain spaces.
+        rparen = data.rfind(b")")
+        rest = data[rparen+2:].split()
+        starttime_ticks = int(rest[19])  # 22 - 3 (pid, comm, then 0-indexed)
+        ticks = os.sysconf("SC_CLK_TCK") or 100
+        return _boot_time() + starttime_ticks // ticks
+    except Exception:
+        return 0
+
+now = int(time.time())
+C_RED = os.environ.get("C_RED", "")
+C_GREEN = os.environ.get("C_GREEN", "")
+C_DIM = os.environ.get("C_DIM", "")
+C_RESET = os.environ.get("C_RESET", "")
+
+# Header
+print(f"  {C_DIM}{'session':<14} {'p#':<3} {'acct':<5} {'home':<42} {'pid':<8} {'up':<8} {'exp':<5} status{C_RESET}")
+
+rows = []
+for line in raw.splitlines():
+    parts = line.split("|")
+    if len(parts) < 5:
+        continue
+    sname, pidx, ppid, pstart, pleft = parts[0], parts[1], parts[2], parts[3], parts[4]
+    # Prefer tmux pane_start_time if non-empty; otherwise read from /proc.
+    pstart_i = 0
+    try:
+        if pstart.strip():
+            pstart_i = int(pstart)
+    except ValueError:
+        pstart_i = 0
+    if not pstart_i:
+        try:
+            pstart_i = pid_start_unix(int(ppid))
+        except Exception:
+            pstart_i = now
+    rows.append((sname, pleft, pidx, ppid, pstart_i))
+
+# Sort by session, then by pane_left so panes display left-to-right.
+rows.sort(key=lambda r: (r[0], int(r[1]) if r[1].isdigit() else 0))
+
+mismatches = 0
+for sname, _, pidx, ppid, pstart in rows:
+    try:
+        ppid_i = int(ppid)
+    except ValueError:
+        continue
+    cpid, chome = claude_child(ppid_i)
+    expected = expected_acct_for_session(sname)
+    if chome:
+        real = os.path.realpath(chome)
+        actual = home_to_id.get(real, "?")
+    else:
+        actual = "-"
+    # Decide row color. Pad PLAIN text first, then wrap with escapes,
+    # so column widths stay aligned in the terminal output.
+    if expected and actual != "?" and actual != "-" and actual != expected:
+        marker = f"{C_RED}MISMATCH{C_RESET}"
+        mismatches += 1
+        acct_raw, color = actual, C_RED
+    elif actual == "-":
+        marker = f"{C_DIM}(no claude){C_RESET}"
+        acct_raw, color = "-", C_DIM
+    elif actual == "?":
+        marker = f"{C_DIM}unknown{C_RESET}"
+        acct_raw, color = "?", C_DIM
+    else:
+        marker = f"{C_GREEN}ok{C_RESET}"
+        acct_raw, color = actual, C_GREEN
+    acct_col = f"{color}{acct_raw:<5}{C_RESET}"
+    home_disp = chome if chome else "-"
+    if len(home_disp) > 42:
+        home_disp = "…" + home_disp[-41:]
+    up = fmt_uptime(now - pstart)
+    exp_raw = expected if expected else "?"
+    exp_col = exp_raw if expected else f"{C_DIM}?{C_RESET}"
+    # Use fixed-width plain padding; insert pre-padded colored cells inline.
+    print(f"  {sname:<14} {pidx:<3} {acct_col} {home_disp:<42} {ppid:<8} {up:<8} {exp_col:<5} {marker}")
+
+if mismatches:
+    print(f"\n  {C_RED}{mismatches} pane(s) running on the wrong account{C_RESET}")
+PY
+    echo
 }
 
 cmd_sync() {
@@ -728,11 +1009,16 @@ cmd_help() {
 ${C_BOLD}cc${C_RESET} — OpenClaw + Claude Code daily-driver wrapper
 
 ${C_BOLD}USAGE${C_RESET}
-  cc [-a <id>]          Start or attach the default 'main' session.
-                        -a picks a specific account for this launch only.
-                        New sessions open as 5 vertical panes, each running
-                        claude on the chosen account. Override with
-                        CC_PANES=N (1-9), e.g. CC_PANES=1 cc.
+  cc [-a <id>]          Start or attach a cc session.
+                        Bare 'cc' starts/attaches the default 'main' session
+                        on the active account. '-a <id>' selects a different
+                        account; if that account is NOT the active one, a
+                        per-account session named 'main-<id>' is used so the
+                        two never collide. New sessions open as 5 vertical
+                        panes, each running claude on the chosen account.
+                        Override with CC_PANES=N (1-9), e.g. CC_PANES=1 cc.
+  cc <id>               Account shortcut. 'cc a' → main session on A.
+                        'cc b' → main-B session on B. Lowercase or upper.
   cc new [-a <id>] [name]
                         Create another parallel session (auto-named main-2,
                         main-3, … if no name given). -a overrides the default
@@ -780,6 +1066,7 @@ case "$_cmd" in
     ""|start)   shift 2>/dev/null || true; cmd_start "$@" ;;
     new)        shift; cmd_new "$@" ;;
     ls|list)    cmd_ls ;;
+    panes)      print_panes_table ;;
     use)        shift; cmd_use "$@" ;;
     attach)     shift; cmd_attach "$@" ;;
     sync)       cmd_sync ;;
@@ -790,8 +1077,16 @@ case "$_cmd" in
     fav)        shift; cmd_fav "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
-        # Check if it's a favorite shortcut before failing
-        if is_favorite "$_cmd"; then
+        # Single-letter account shortcut: `cc a`, `cc b`, etc.
+        # Matches a single uppercase letter that exists in ~/.tokenburn.json.
+        # Translates to `cc -a <ID>` so it always launches/attaches the
+        # per-account session (main for active, main-<ID> for non-active).
+        # Favorites are tried only after we've ruled out account IDs so a
+        # favorite named "b" can never shadow account B.
+        if [[ "$_cmd" =~ ^[A-Za-z]$ ]] && account_exists "${_cmd^^}"; then
+            shift
+            cmd_start -a "${_cmd^^}" "$@"
+        elif is_favorite "$_cmd"; then
             launch_favorite "$_cmd"
         else
             warn "unknown command: $_cmd"; echo; cmd_help; exit 1

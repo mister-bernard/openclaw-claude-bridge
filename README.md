@@ -142,7 +142,7 @@ obvious which context you're in at a glance.
 {
   "gc": { "name": "Giant Cedar", "workdir": "~/giant-cedar",
           "claude_bin": "claude", "color": "green" },
-  "pv": { "name": "PV Fund",     "workdir": "~/projects/pv-fund",
+  "ex": { "name": "Example",     "workdir": "~/projects/example",
           "claude_bin": "claude", "color": "yellow" }
 }
 ```

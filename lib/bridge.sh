@@ -197,7 +197,7 @@ synthesize_l0() {
 # CLAUDE.md (L0 — Public/Untrusted Channel)
 
 This session operates under public channel rules.
-Only the Mr. Bernard public persona is available. No system details,
+Only the configured public persona is available. No system details,
 no operator identity, no infrastructure context.
 
 ---
