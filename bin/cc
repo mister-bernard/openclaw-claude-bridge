@@ -116,6 +116,81 @@ sys.exit(0 if os.environ["ACCT_ID"] in ids else 1)
 PY
 }
 
+# ---- Per-pane account detection ---------------------------------------------
+# For each pane in the given tmux session, walk the pane's shell PID to its
+# child `claude` process and resolve that process's HOME env var. Match it
+# against each account's `claude_home` in ~/.tokenburn.json to identify the
+# account. This is correct even when wrappers like `claude-b` exec into the
+# shared `claude` binary with an overridden HOME (which wipes `.claude-b`
+# from the cmdline — the old cmdline heuristic read those panes as "A").
+# Output examples:
+#   "A"          (all panes on A — collapsed)
+#   "A·B·A·A·A"  (mixed — per-pane left-to-right)
+#   "?"          (no claude running yet, or pane not inspectable)
+session_accounts() {
+    local sname="$1"
+    # Collect pane PIDs (left-to-right by pane_left, matching create_session order)
+    local pids
+    pids=$(tmux_cc list-panes -t "$sname" -F '#{pane_left} #{pane_pid}' 2>/dev/null \
+        | sort -n | awk '{print $2}' | paste -sd ' ' -)
+    [[ -n "$pids" ]] || { echo "?"; return 0; }
+    ACCOUNTS_FILE="$ACCOUNTS_FILE" PIDS="$pids" python3 <<'PY' 2>/dev/null || echo "?"
+import json, os
+# Build {claude_home -> account_id} map so we can match any claude process's
+# HOME to the account that owns that HOME. Normalise paths (strip trailing /).
+home_to_id = {}
+try:
+    cfg = json.load(open(os.environ["ACCOUNTS_FILE"]))
+    for a in cfg.get("accounts", []):
+        home = a.get("claude_home")
+        if home:
+            home_to_id[os.path.realpath(home.rstrip("/"))] = a.get("id", "?")
+except Exception:
+    pass
+
+def read_home(pid):
+    try:
+        env = open(f"/proc/{pid}/environ", "rb").read().split(b"\x00")
+    except Exception:
+        return None
+    for kv in env:
+        if kv.startswith(b"HOME="):
+            return kv[5:].decode(errors="replace").rstrip("/")
+    return None
+
+def acct_for(pid):
+    try:
+        children = open(f"/proc/{pid}/task/{pid}/children").read().split()
+    except Exception:
+        return "?"
+    for c in children:
+        try:
+            cmd = open(f"/proc/{c}/cmdline","rb").read().replace(b"\x00", b" ").decode(errors="replace")
+        except Exception:
+            continue
+        if "claude" not in cmd:
+            # Recurse one level — covers `bash -c '... claude ...'` wrappers
+            sub = acct_for(c)
+            if sub != "?":
+                return sub
+            continue
+        home = read_home(c)
+        if home:
+            aid = home_to_id.get(os.path.realpath(home))
+            if aid:
+                return aid
+        # Last-resort fallback: inspect cmdline for a tagged wrapper binary.
+        return "B" if ".claude-b" in cmd else "A"
+    return "?"
+
+accts = [acct_for(p) for p in os.environ["PIDS"].split()]
+if accts and len(set(accts)) == 1:
+    print(accts[0])
+else:
+    print("·".join(accts))
+PY
+}
+
 # ---- Favorite styling -------------------------------------------------------
 # Map a color name to a hex value used by the tmux theme. Unknown names fall
 # through to the default accent (matches the base tmux.conf).
@@ -287,19 +362,29 @@ cmd_start() {
         warn "unknown account: $acct_flag (see 'cc ls')"; exit 1
     fi
 
+    # Resolve the session name we want.
+    # When -a <id> is supplied we use a per-account session name (main-<id>)
+    # so launching 'cc -a B' from inside the main(A) session opens a SEPARATE
+    # tmux session on B instead of silently attaching to the existing main.
+    # If -a is omitted we use the conventional default 'main'.
+    local target_session="$DEFAULT_SESSION"
+    if [[ -n "$acct_flag" ]] && [[ "$acct_flag" != "$(active_account_id)" ]]; then
+        target_session="${DEFAULT_SESSION}-${acct_flag}"
+    fi
+
     # Sync CLAUDE.md in the background so we don't delay session start.
     if [[ -x "$BRIDGE_LIB" ]]; then
         ( bash "$BRIDGE_LIB" sync >/dev/null 2>&1 & )
     fi
 
-    if session_exists "$DEFAULT_SESSION"; then
-        info "attaching to existing cc session '$DEFAULT_SESSION'"
-        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
+    if session_exists "$target_session"; then
+        info "attaching to existing cc session '$target_session'"
+        exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$target_session"
     fi
 
-    create_session "$DEFAULT_SESSION" "$acct_flag"
+    create_session "$target_session" "$acct_flag"
 
-    ok "session ready — attaching"
+    ok "session '$target_session' ready — attaching"
     echo
     dim "  prefix = Ctrl-b  |  scroll = mouse wheel or Shift+PgUp"
     dim "  prefix + B = horizontal bars layout"
@@ -308,7 +393,7 @@ cmd_start() {
     dim "  run 'cc new' in another terminal for a parallel session"
     echo
     sleep 0.3
-    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$DEFAULT_SESSION"
+    exec tmux -L "$SOCKET" -f "$BRIDGE_TMUX_CONF" attach -t "$target_session"
 }
 
 cmd_new() {
@@ -426,12 +511,13 @@ for key, f in favs.items():
         return 0
     fi
     printf "%scc sessions%s\n" "$C_BOLD" "$C_RESET"
-    local sname attached panes tag
+    local sname attached panes tag accts
     while IFS=$'\t' read -r sname attached; do
         panes=$(tmux_cc list-panes -s -t "$sname" 2>/dev/null | wc -l)
         tag=""
         [[ "$attached" == "1" ]] && tag=" ${C_GREEN}(attached)${C_RESET}"
-        printf "  %-20s %s pane(s)%b\n" "$sname" "$panes" "$tag"
+        accts=$(session_accounts "$sname")
+        printf "  %-20s %s pane(s)  acct: %-12s%b\n" "$sname" "$panes" "$accts" "$tag"
     done < <(tmux_cc list-sessions -F "#{session_name}	#{session_attached}" 2>/dev/null)
     echo
     dim "  cc attach <name>   attach to a session"
@@ -728,11 +814,16 @@ cmd_help() {
 ${C_BOLD}cc${C_RESET} — OpenClaw + Claude Code daily-driver wrapper
 
 ${C_BOLD}USAGE${C_RESET}
-  cc [-a <id>]          Start or attach the default 'main' session.
-                        -a picks a specific account for this launch only.
-                        New sessions open as 5 vertical panes, each running
-                        claude on the chosen account. Override with
-                        CC_PANES=N (1-9), e.g. CC_PANES=1 cc.
+  cc [-a <id>]          Start or attach a cc session.
+                        Bare 'cc' starts/attaches the default 'main' session
+                        on the active account. '-a <id>' selects a different
+                        account; if that account is NOT the active one, a
+                        per-account session named 'main-<id>' is used so the
+                        two never collide. New sessions open as 5 vertical
+                        panes, each running claude on the chosen account.
+                        Override with CC_PANES=N (1-9), e.g. CC_PANES=1 cc.
+  cc <id>               Account shortcut. 'cc a' → main session on A.
+                        'cc b' → main-B session on B. Lowercase or upper.
   cc new [-a <id>] [name]
                         Create another parallel session (auto-named main-2,
                         main-3, … if no name given). -a overrides the default
@@ -790,8 +881,16 @@ case "$_cmd" in
     fav)        shift; cmd_fav "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
-        # Check if it's a favorite shortcut before failing
-        if is_favorite "$_cmd"; then
+        # Single-letter account shortcut: `cc a`, `cc b`, etc.
+        # Matches a single uppercase letter that exists in ~/.tokenburn.json.
+        # Translates to `cc -a <ID>` so it always launches/attaches the
+        # per-account session (main for active, main-<ID> for non-active).
+        # Favorites are tried only after we've ruled out account IDs so a
+        # favorite named "b" can never shadow account B.
+        if [[ "$_cmd" =~ ^[A-Za-z]$ ]] && account_exists "${_cmd^^}"; then
+            shift
+            cmd_start -a "${_cmd^^}" "$@"
+        elif is_favorite "$_cmd"; then
             launch_favorite "$_cmd"
         else
             warn "unknown command: $_cmd"; echo; cmd_help; exit 1
